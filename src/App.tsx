@@ -874,8 +874,9 @@ export function App() {
     });
   }
 
-  async function importFont(file: File) {
-    if (!isSupportedFontFile(file)) {
+  async function importFonts(files: File[]) {
+    const supportedFiles = files.filter(isSupportedFontFile);
+    if (supportedFiles.length === 0) {
       setStatus('TTF 또는 OTF 폰트 파일만 가져올 수 있습니다.');
       return;
     }
@@ -885,53 +886,61 @@ export function App() {
       return;
     }
 
-    const url = URL.createObjectURL(file);
+    const imported: AppFontAsset[] = [];
+    let failedCount = 0;
 
-    try {
-      const meta = await getFontMetadataFromFile(file);
-      const face = new FontFace(meta.family, `url(${url})`, {
-        style: meta.style,
-        weight: String(meta.weight)
-      });
-      await face.load();
-      document.fonts.add(face);
-      importedFontUrlsRef.current.push(url);
+    for (const file of supportedFiles) {
+      const url = URL.createObjectURL(file);
 
-      const fontAsset: AppFontAsset = {
-        id: crypto.randomUUID(),
-        ...meta,
-        source: 'local',
-        file
-      };
-
-      setFontAssets((previous) => {
-        const sameVariant = (asset: AppFontAsset) =>
-          asset.family === fontAsset.family &&
-          asset.weight === fontAsset.weight &&
-          asset.style === fontAsset.style &&
-          asset.source === fontAsset.source;
-
-        return [...previous.filter((asset) => !sameVariant(asset)), fontAsset];
-      });
-
-      if (selectedCue) {
-        updateCueStyle(selectedCue.id, {
-          fontFamily: meta.family,
-          fontWeight: meta.weight
+      try {
+        const meta = await getFontMetadataFromFile(file);
+        const face = new FontFace(meta.family, `url(${url})`, {
+          style: meta.style,
+          weight: String(meta.weight)
         });
-      } else if (selectedOverlay) {
-        updateOverlay(selectedOverlay.id, {
-          fontFamily: meta.family,
-          fontWeight: meta.weight,
-          italic: meta.style === 'italic'
+        await face.load();
+        document.fonts.add(face);
+        importedFontUrlsRef.current.push(url);
+        imported.push({
+          id: crypto.randomUUID(),
+          ...meta,
+          source: 'local',
+          file
         });
+      } catch {
+        failedCount += 1;
+        URL.revokeObjectURL(url);
       }
-
-      setStatus(`${fontAsset.displayName} 폰트 가져옴`);
-    } catch {
-      URL.revokeObjectURL(url);
-      setStatus('폰트 파일을 읽지 못했습니다.');
     }
+
+    if (imported.length === 0) {
+      setStatus('폰트 파일을 읽지 못했습니다.');
+      return;
+    }
+
+    setFontAssets((previous) => mergeFontAssets(previous, imported));
+
+    const preferredFont = choosePreferredImportedFont(imported);
+
+    if (selectedCue) {
+      updateCueStyle(selectedCue.id, {
+        fontFamily: preferredFont.family,
+        fontWeight: preferredFont.weight
+      });
+    } else if (selectedOverlay) {
+      updateOverlay(selectedOverlay.id, {
+        fontFamily: preferredFont.family,
+        fontWeight: preferredFont.weight,
+        italic: preferredFont.style === 'italic'
+      });
+    }
+
+    const familyCount = new Set(imported.map((font) => font.family)).size;
+    setStatus(
+      failedCount > 0
+        ? `폰트 ${imported.length}개 가져옴, ${failedCount}개 실패`
+        : `폰트 ${imported.length}개 가져옴 · ${familyCount}개 패밀리`
+    );
   }
 
   function commitEditor(
@@ -2336,11 +2345,12 @@ export function App() {
       <input
         ref={fontInputRef}
         type="file"
+        multiple
         accept=".ttf,.otf,font/ttf,font/otf"
         hidden
         onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) void importFont(file);
+          const files = Array.from(event.target.files ?? []);
+          if (files.length > 0) void importFonts(files);
           event.currentTarget.value = '';
         }}
       />
@@ -3170,31 +3180,51 @@ function FontManager({
   fonts: AppFontAsset[];
   onImport: () => void;
 }) {
+  const fontGroups = getFontFamilyGroups(fonts);
+
   return (
     <div className="font-manager">
       <div className="font-manager-head">
-        <strong>폰트</strong>
+        <div>
+          <strong>폰트</strong>
+          <small>
+            {fontGroups.length} 패밀리 · {fonts.length} variants
+          </small>
+        </div>
         <button type="button" onClick={onImport}>
           <Upload size={15} />
           가져오기
         </button>
       </div>
-      <div className="font-chip-row">
-        {fonts.map((font) => (
-          <span
-            key={font.id}
-            style={{
-              fontFamily: font.family,
-              fontWeight: font.weight,
-              fontStyle: font.style
-            }}
-          >
-            <strong>{font.displayName}</strong>
-            <small>
-              {font.weight} · {getFontWeightLabel(font.weight)}
-              {font.style === 'italic' ? ' Italic' : ''}
-            </small>
-          </span>
+      <div className="font-family-list">
+        {fontGroups.map((group) => (
+          <article key={group.family} className="font-family-card">
+            <div className="font-family-title">
+              <strong style={{ fontFamily: group.family }}>{group.displayName}</strong>
+              <small>
+                {group.variants.length} variant{group.variants.length > 1 ? 's' : ''}
+              </small>
+            </div>
+            <div className="font-variant-row">
+              {group.variants.map((font) => (
+                <span
+                  key={font.id}
+                  style={{
+                    fontFamily: font.family,
+                    fontWeight: font.weight,
+                    fontStyle: font.style
+                  }}
+                  title={font.displayName}
+                >
+                  {font.weight}
+                  <small>
+                    {getFontWeightLabel(font.weight)}
+                    {font.style === 'italic' ? ' Italic' : ''}
+                  </small>
+                </span>
+              ))}
+            </div>
+          </article>
         ))}
       </div>
       <div className="font-downloads">
@@ -6602,6 +6632,68 @@ function getFontFamilyOptions(fonts: AppFontAsset[], currentFamily: string) {
         ? `${font.displayName} (${font.variantCount} weights)`
         : font.displayName
   }));
+}
+
+function getFontFamilyGroups(fonts: AppFontAsset[]) {
+  const grouped = new Map<string, AppFontAsset[]>();
+
+  fonts.forEach((font) => {
+    const current = grouped.get(font.family) ?? [];
+    current.push(font);
+    grouped.set(font.family, current);
+  });
+
+  return Array.from(grouped.entries())
+    .map(([family, variants]) => {
+      const sortedVariants = [...variants].sort((a, b) => {
+        if (a.source !== b.source) return a.source === 'builtin' ? -1 : 1;
+        if (a.weight !== b.weight) return a.weight - b.weight;
+        return a.style.localeCompare(b.style);
+      });
+      const first = sortedVariants[0];
+
+      return {
+        family,
+        displayName: first?.source === 'builtin' ? first.displayName : family,
+        variants: sortedVariants
+      };
+    })
+    .sort((a, b) => {
+      const aBuiltin = a.variants.some((font) => font.source === 'builtin');
+      const bBuiltin = b.variants.some((font) => font.source === 'builtin');
+      if (aBuiltin !== bBuiltin) return aBuiltin ? -1 : 1;
+      return a.displayName.localeCompare(b.displayName);
+    });
+}
+
+function mergeFontAssets(previous: AppFontAsset[], imported: AppFontAsset[]) {
+  const next = [...previous];
+
+  imported.forEach((fontAsset) => {
+    const existingIndex = next.findIndex(
+      (asset) =>
+        asset.family === fontAsset.family &&
+        asset.weight === fontAsset.weight &&
+        asset.style === fontAsset.style &&
+        asset.source === fontAsset.source
+    );
+
+    if (existingIndex >= 0) {
+      next[existingIndex] = fontAsset;
+    } else {
+      next.push(fontAsset);
+    }
+  });
+
+  return next;
+}
+
+function choosePreferredImportedFont(imported: AppFontAsset[]) {
+  return (
+    imported.find((font) => font.weight === 400 && font.style === 'normal') ??
+    imported.find((font) => font.style === 'normal') ??
+    imported[0]
+  );
 }
 
 function snapPreviewPosition(x: number, y: number) {

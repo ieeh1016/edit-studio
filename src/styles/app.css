@@ -1269,8 +1269,7 @@ select:focus-visible {
 }
 
 .font-manager-head,
-.font-downloads,
-.font-chip-row {
+.font-downloads {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1281,8 +1280,19 @@ select:focus-visible {
   justify-content: space-between;
 }
 
+.font-manager-head > div {
+  display: grid;
+  gap: 2px;
+}
+
 .font-manager-head strong {
   font-size: 13px;
+}
+
+.font-manager-head small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .font-manager-head button,
@@ -1306,29 +1316,70 @@ select:focus-visible {
   color: var(--teal-deep);
 }
 
-.font-chip-row span {
-  display: inline-grid;
-  gap: 1px;
-  max-width: 100%;
-  overflow: hidden;
+.font-family-list {
+  display: grid;
+  gap: 7px;
+  max-height: 180px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.font-family-card {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: #eef2ea;
-  color: var(--muted);
-  padding: 5px 8px;
+  background: #fff;
+  padding: 8px;
+}
+
+.font-family-title {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.font-family-title strong {
+  overflow: hidden;
+  color: var(--ink);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.font-chip-row strong {
-  overflow: hidden;
-  color: inherit;
-  font-size: 12px;
-  line-height: 1.15;
-  text-overflow: ellipsis;
+.font-family-title small {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
 }
 
-.font-chip-row small {
+.font-variant-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.font-variant-row span {
+  display: inline-grid;
+  gap: 1px;
+  max-width: 100%;
+  overflow: hidden;
+  min-width: 54px;
+  border: 1px solid #dce2da;
+  border-radius: 7px;
+  background: #eef2ea;
+  color: var(--muted);
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.font-variant-row small {
   color: currentColor;
   font-size: 10px;
   font-weight: 700;
@@ -2232,11 +2283,6 @@ select:focus-visible {
 .panel-actions,
 .item-list {
   border-bottom-color: var(--line);
-}
-
-.font-chip-row span {
-  background: #252a23;
-  color: #bec8ba;
 }
 
 .item-card {
@@ -3323,9 +3369,18 @@ body {
   color: #eef3f8;
 }
 
-.font-chip-row span {
+.font-family-card {
   border: 1px solid #28303b;
   background: #11161d;
+}
+
+.font-family-title strong {
+  color: #eef3f8;
+}
+
+.font-variant-row span {
+  border-color: #28303b;
+  background: #161c25;
   color: #aeb7c7;
 }
 
