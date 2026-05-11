@@ -21,6 +21,12 @@ export interface TimelineItemLayout<T> {
   lane: number;
 }
 
+export interface TimelineThumbnailWindow {
+  start: number;
+  end: number;
+  step: number;
+}
+
 export function getTimelineContentWidth(
   duration: number,
   pxPerSecond: number,
@@ -31,6 +37,35 @@ export function getTimelineContentWidth(
     viewportWidth,
     Math.ceil(Math.max(duration, 1) * pxPerSecond + edgePadding * 2)
   );
+}
+
+export function chooseThumbnailStepForPxPerSecond(pxPerSecond: number) {
+  const targetSpacingPx = pxPerSecond >= 90 ? 120 : pxPerSecond >= 42 ? 150 : 210;
+  return clamp(targetSpacingPx / Math.max(pxPerSecond, 0.1), 0.5, 24);
+}
+
+export function getVisibleThumbnailTimes(
+  duration: number,
+  request: TimelineThumbnailWindow,
+  maxCount = 96
+) {
+  const safeDuration = Math.max(MIN_CUE_DURATION, duration);
+  const start = clamp(request.start, 0, safeDuration);
+  const end = clamp(Math.max(request.end, start + request.step), 0, safeDuration);
+  const step = Math.max(0.5, request.step);
+  const times: number[] = [];
+  let cursor = Math.floor(start / step) * step;
+
+  while (cursor <= end && times.length < maxCount) {
+    times.push(clamp(cursor, 0, Math.max(0, safeDuration - 0.08)));
+    cursor += step;
+  }
+
+  if (times.length === 0) {
+    times.push(clamp(start, 0, Math.max(0, safeDuration - 0.08)));
+  }
+
+  return Array.from(new Set(times.map((time) => Number(time.toFixed(2)))));
 }
 
 export function timeToTimelineX(time: number, pxPerSecond: number) {

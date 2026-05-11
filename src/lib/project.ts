@@ -10,6 +10,7 @@ import {
   type CaptionStyle,
   type InteractionEffect,
   type InteractionEffectKind,
+  type ProjectMediaMeta,
   type ProjectFile,
   type TextAlign,
   type TextOverlay,
@@ -70,6 +71,7 @@ export function normalizeProjectFile(input: unknown): ProjectFile {
   return {
     version: 1,
     videoName: typeof input.videoName === 'string' ? input.videoName : undefined,
+    mediaMeta: normalizeMediaMeta(input.mediaMeta),
     cues,
     overlays,
     effects,
@@ -77,6 +79,25 @@ export function normalizeProjectFile(input: unknown): ProjectFile {
     transitions,
     createdAt,
     updatedAt
+  };
+}
+
+function normalizeMediaMeta(input: unknown): ProjectMediaMeta | undefined {
+  if (!isRecord(input) || typeof input.name !== 'string') return undefined;
+
+  const size = finiteNumber(input.size, 0);
+  const lastModified = finiteNumber(input.lastModified, 0);
+  const duration = optionalFiniteNumber(input.duration);
+  const width = optionalFiniteNumber(input.width);
+  const height = optionalFiniteNumber(input.height);
+
+  return {
+    name: input.name,
+    size: Math.max(0, size),
+    lastModified: Math.max(0, lastModified),
+    ...(duration !== undefined ? { duration: Math.max(0, duration) } : {}),
+    ...(width !== undefined ? { width: Math.max(0, Math.round(width)) } : {}),
+    ...(height !== undefined ? { height: Math.max(0, Math.round(height)) } : {})
   };
 }
 
@@ -222,6 +243,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function finiteNumber(value: unknown, fallback: number) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function optionalFiniteNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 function stringOr(value: unknown, fallback: string) {

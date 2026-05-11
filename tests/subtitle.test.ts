@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildAssScript, escapeAssText, hexToAssColor } from '../src/lib/ass';
 import { getCueDiagnostics } from '../src/lib/diagnostics';
+import { createExportPreflightResult } from '../src/lib/export-preflight';
 import { buildVideoEditFilterGraph, getExportDimensions } from '../src/lib/ffmpeg';
 import {
   commitEditorHistory,
@@ -176,6 +177,14 @@ describe('project file normalization', () => {
     const project = normalizeProjectFile({
       version: 1,
       videoName: 12,
+      mediaMeta: {
+        name: 'source.mp4',
+        size: 1234.4,
+        lastModified: 1700000000000,
+        duration: 10.2,
+        width: 1920.6,
+        height: 1080.2
+      },
       cues: [
         {
           id: 7,
@@ -239,6 +248,14 @@ describe('project file normalization', () => {
     });
 
     expect(project.videoName).toBeUndefined();
+    expect(project.mediaMeta).toEqual({
+      name: 'source.mp4',
+      size: 1234.4,
+      lastModified: 1700000000000,
+      duration: 10.2,
+      width: 1921,
+      height: 1080
+    });
     expect(project.cues[0].start).toBe(0);
     expect(project.cues[0].end).toBeGreaterThanOrEqual(0.2);
     expect(project.cues[0].position).toBe('bottom');
@@ -358,6 +375,36 @@ describe('video clip editing', () => {
     expect(graph).toContain('xfade=transition=slideleft');
     expect(graph).toContain('acrossfade=d=0.5');
     expect(graph).toContain('subtitles=captions.ass:fontsdir=fonts-test');
+  });
+
+  it('uses a silent audio fallback when the source has no audio stream', () => {
+    const graph = buildVideoEditFilterGraph({
+      clips,
+      transitions: [],
+      outputDimensions: { width: 1280, height: 720 },
+      subtitleName: 'captions.ass',
+      hasAudio: false
+    });
+
+    expect(graph).toContain('anullsrc=channel_layout=stereo');
+    expect(graph).not.toContain('[0:a]atrim');
+    expect(graph).toContain('concat=n=2:v=0:a=1');
+  });
+
+  it('reports export preflight risks before rendering', () => {
+    const result = createExportPreflightResult({
+      sourceDuration: 1500,
+      dimensions: { width: 3840, height: 2160 },
+      preset: 'source',
+      clips,
+      transitions: createOrUpdateTransition(clips, [], 'clip-a', 'fade', 0.5),
+      hasAudio: false,
+      fileSize: 2_000_000_000
+    });
+
+    expect(result.risk).toBe('high');
+    expect(result.messages.join(' ')).toContain('무음 트랙');
+    expect(result.messages.join(' ')).toContain('브라우저 메모리');
   });
 });
 

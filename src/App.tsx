@@ -39,9 +39,11 @@ import type {
 } from 'react';
 import {
   cancelActiveExport,
+  ExportRenderError,
   exportVideoWithBurnedSubtitles,
   getExportDimensions
 } from './lib/ffmpeg';
+import { createExportPreflightResult } from './lib/export-preflight';
 import { buildAssScript } from './lib/ass';
 import {
   createCue,
@@ -98,6 +100,7 @@ import {
   type ExportPreset,
   type InteractionEffect,
   type InteractionEffectKind,
+  type ProjectMediaMeta,
   type ProjectFile,
   type TextAlign,
   type TextOverlay,
@@ -110,18 +113,21 @@ import {
   TIMELINE_MAX_PX_PER_SECOND,
   TIMELINE_MIN_PX_PER_SECOND,
   TIMELINE_MIN_ITEM_WIDTH,
+  chooseThumbnailStepForPxPerSecond,
   clampTimelineScrollLeft,
   createTimelineTicks,
   fitTimelinePxPerSecond,
   getTimelineContentWidth,
   getVisibleTimelineRange,
+  getVisibleThumbnailTimes,
   isCompactTimelineItem,
   layoutTimelineItems,
   timeToTimelineX,
   timelineItemStyle,
   timelineXToTime,
   zoomTimelineAroundAnchor,
-  type TimelineItemLayout
+  type TimelineItemLayout,
+  type TimelineThumbnailWindow
 } from './lib/timeline';
 
 type Selection =
@@ -138,6 +144,7 @@ type TimelineItemKind = 'cue' | 'overlay' | 'effect';
 type TimelineTrackKind = 'video' | 'cue' | 'overlay' | 'effect';
 type TimelineTrackHeights = Record<TimelineTrackKind, number>;
 type TimelineThumbnail = { time: number; url: string };
+type TimelineThumbnailRequest = TimelineThumbnailWindow;
 type VideoImportMode = 'normal' | 'relink';
 type PendingResetAction =
   | { kind: 'reset-project' }
@@ -313,7 +320,7 @@ const helpSections = [
   },
   {
     title: '내보내기',
-    body: '첫 MP4 렌더는 31MB급 FFmpeg WASM 준비가 필요합니다. 긴 영상은 720p 빠른 렌더로 먼저 확인하는 흐름이 좋습니다.'
+    body: '첫 MP4 렌더는 31MB급 FFmpeg WASM 준비가 필요합니다. 긴 영상은 720p 빠른 렌더로 먼저 확인하는 흐름이 좋고, 원본 파일은 서버로 업로드되지 않습니다.'
   }
 ];
 const textOverlayStylePresets: TextOverlayStylePreset[] = [
@@ -411,6 +418,8 @@ export function App() {
   const playbackClockRef = useRef<number | null>(null);
   const videoImportModeRef = useRef<VideoImportMode>('normal');
   const videoCacheVersionRef = useRef(0);
+  const thumbnailCacheRef = useRef<Map<number, TimelineThumbnail>>(new Map());
+  const thumbnailVideoUrlRef = useRef<string | null>(null);
 
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -435,15 +444,19 @@ export function App() {
   const [exportPhase, setExportPhase] = useState<ExportPhase>('idle');
   const [exportUrl, setExportUrl] = useState<string | null>(null);
   const [exportDownloadName, setExportDownloadName] = useState('captioned-output.mp4');
+  const [exportLastLog, setExportLastLog] = useState('');
+  const [exportPreflightNote, setExportPreflightNote] = useState('');
   const [cutRange, setCutRange] = useState<CutRange>({ start: null, end: null });
   const [fontAssets, setFontAssets] = useState<AppFontAsset[]>([builtinFontAsset]);
   const [lastAutosavedAt, setLastAutosavedAt] = useState<string | null>(null);
   const [restoredVideoName, setRestoredVideoName] = useState<string | null>(null);
+  const [mediaMeta, setMediaMeta] = useState<ProjectMediaMeta | null>(null);
   const [isRestoringVideo, setIsRestoringVideo] = useState(false);
   const [status, setStatus] = useState('영상 파일을 선택하면 편집을 시작할 수 있습니다.');
   const [projectCreatedAt, setProjectCreatedAt] = useState(new Date().toISOString());
   const [effectReplayTokens, setEffectReplayTokens] = useState<Record<string, number>>({});
   const [timelineThumbnails, setTimelineThumbnails] = useState<TimelineThumbnail[]>([]);
+  const [thumbnailRequest, setThumbnailRequest] = useState<TimelineThumbnailRequest | null>(null);
   const [pendingResetAction, setPendingResetAction] = useState<PendingResetAction | null>(null);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isGuideActive, setIsGuideActive] = useState(false);
@@ -468,27 +481,64 @@ export function App() {
     let cancelled = false;
 
     if (!videoUrl || duration <= 0) {
+      thumbnailCacheRef.current.clear();
+      thumbnailVideoUrlRef.current = videoUrl;
       setTimelineThumbnails([]);
       return;
     }
 
-    setTimelineThumbnails([]);
-    generateTimelineThumbnails(videoUrl, duration)
+    if (thumbnailVideoUrlRef.current !== videoUrl) {
+      thumbnailCacheRef.current.clear();
+      thumbnailVideoUrlRef.current = videoUrl;
+    }
+
+    const request = thumbnailRequest ?? {
+      start: 0,
+      end: Math.min(duration, 90),
+      step: getThumbnailStepForRange(0, Math.min(duration, 90))
+    };
+    const desiredTimes = getVisibleThumbnailTimes(duration, request, TIMELINE_MAX_THUMBNAILS);
+    const missingTimes = desiredTimes.filter(
+      (time) => !thumbnailCacheRef.current.has(getThumbnailCacheKey(time))
+    );
+
+    if (missingTimes.length === 0) {
+      setTimelineThumbnails(
+        desiredTimes
+          .map((time) => thumbnailCacheRef.current.get(getThumbnailCacheKey(time)))
+          .filter((thumbnail): thumbnail is TimelineThumbnail => Boolean(thumbnail))
+      );
+      return;
+    }
+
+    generateTimelineThumbnails(videoUrl, missingTimes)
       .then((thumbnails) => {
         if (!cancelled) {
-          setTimelineThumbnails(thumbnails);
+          thumbnails.forEach((thumbnail) => {
+            thumbnailCacheRef.current.set(getThumbnailCacheKey(thumbnail.time), thumbnail);
+          });
+          pruneThumbnailCache(thumbnailCacheRef.current, desiredTimes);
+          setTimelineThumbnails(
+            desiredTimes
+              .map((time) => thumbnailCacheRef.current.get(getThumbnailCacheKey(time)))
+              .filter((thumbnail): thumbnail is TimelineThumbnail => Boolean(thumbnail))
+          );
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setTimelineThumbnails([]);
+          setTimelineThumbnails(
+            desiredTimes
+              .map((time) => thumbnailCacheRef.current.get(getThumbnailCacheKey(time)))
+              .filter((thumbnail): thumbnail is TimelineThumbnail => Boolean(thumbnail))
+          );
         }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [duration, videoUrl]);
+  }, [duration, thumbnailRequest, videoUrl]);
 
   useEffect(() => {
     return () => {
@@ -591,7 +641,7 @@ export function App() {
     fontAssets.length > 1 ||
     exportUrl !== null;
   const needsVideoRelink = Boolean(restoredVideoName && !videoFile);
-  const projectVideoLabel = videoFile?.name ?? restoredVideoName ?? '새 프로젝트';
+  const projectVideoLabel = videoFile?.name ?? restoredVideoName ?? mediaMeta?.name ?? '새 프로젝트';
   const shouldWarnBeforeUnload = hasResettableProject || isExporting;
   const selectionSummary = useMemo(
     () => getTimelineSelectionSummary(selection, clipRanges, cues, overlays, effects),
@@ -742,11 +792,7 @@ export function App() {
       return;
     }
 
-    const expectedName = restoredVideoName;
-    const mismatchMessage =
-      expectedName && file.name !== expectedName
-        ? `${file.name} 연결됨. 저장된 원본명은 ${expectedName}이라 결과가 다를 수 있습니다.`
-        : null;
+    const mismatchMessage = getMediaRelinkMessage(file, mediaMeta, restoredVideoName);
 
     attachVideoFile(file, {
       preserveProject: true,
@@ -777,9 +823,12 @@ export function App() {
     setCurrentTime(0);
     setDuration(0);
     setDimensions(defaultDimensions);
+    setMediaMeta(createProjectMediaMeta(file));
     setIsPlaying(false);
     setCutRange({ start: null, end: null });
     setTimelineThumbnails([]);
+    setThumbnailRequest(null);
+    thumbnailCacheRef.current.clear();
     setRestoredVideoName(null);
     setIsRestoringVideo(false);
     rememberVideoForAutosave(file);
@@ -892,6 +941,8 @@ export function App() {
     if (exportUrl) URL.revokeObjectURL(exportUrl);
     setExportUrl(null);
     setExportDownloadName('captioned-output.mp4');
+    setExportLastLog('');
+    setExportPreflightNote('');
   }
 
   function resetImportedFonts() {
@@ -932,7 +983,10 @@ export function App() {
     setCutRange({ start: null, end: null });
     setEffectReplayTokens({});
     setTimelineThumbnails([]);
+    setThumbnailRequest(null);
+    thumbnailCacheRef.current.clear();
     setRestoredVideoName(null);
+    setMediaMeta(null);
     setIsRestoringVideo(false);
     setProjectCreatedAt(new Date().toISOString());
     setLastAutosavedAt(null);
@@ -1532,9 +1586,10 @@ export function App() {
   async function importProject(file: File) {
     try {
       const project = normalizeProjectFile(JSON.parse(await file.text()));
-      const projectVideoName = project.videoName ?? null;
+      const projectVideoName = project.mediaMeta?.name ?? project.videoName ?? null;
       const requiresVideoRelink = Boolean(
-        projectVideoName && (!videoFile || videoFile.name !== projectVideoName)
+        projectVideoName &&
+          !doesFileMatchProjectMedia(videoFile, project.mediaMeta, projectVideoName)
       );
 
       resetEditor({
@@ -1564,10 +1619,13 @@ export function App() {
         setCurrentTime(0);
         setIsPlaying(false);
         setTimelineThumbnails([]);
+        setThumbnailRequest(null);
+        thumbnailCacheRef.current.clear();
         setRestoredVideoName(projectVideoName);
       } else {
         setRestoredVideoName(null);
       }
+      setMediaMeta(project.mediaMeta ?? (videoFile ? createProjectMediaMeta(videoFile, { duration, ...dimensions }) : null));
       setIsRestoringVideo(false);
       setCutRange({ start: null, end: null });
       setProjectCreatedAt(project.createdAt ?? new Date().toISOString());
@@ -1606,6 +1664,7 @@ export function App() {
     const project: ProjectFile = {
       version: 1,
       videoName: videoFile?.name ?? restoredVideoName ?? undefined,
+      mediaMeta: mediaMeta ?? undefined,
       cues,
       overlays,
       effects,
@@ -1666,9 +1725,23 @@ export function App() {
     setIsExporting(true);
     setExportProgress(0);
     setExportPhase('engine');
+    setExportLastLog('');
+    setExportPreflightNote('');
     setStatus(`${jobLabel} 준비 중`);
 
     try {
+      const detectedAudio = await detectVideoHasAudio(videoFile);
+      const preflight = createExportPreflightResult({
+        sourceDuration: duration,
+        dimensions,
+        preset: exportPreset,
+        clips: jobClips,
+        transitions: jobTransitions,
+        hasAudio: detectedAudio,
+        fileSize: videoFile.size
+      });
+      setExportPreflightNote(formatExportPreflightNote(preflight.messages, preflight.risk));
+
       const blob = await exportVideoWithBurnedSubtitles(
         videoFile,
         jobCues,
@@ -1680,6 +1753,7 @@ export function App() {
           preset: exportPreset,
           dimensions,
           sourceDuration: duration,
+          hasAudio: preflight.hasAudio !== false,
           fontFiles: fontAssets
             .map((asset) => asset.file)
             .filter((file): file is File => Boolean(file)),
@@ -1690,6 +1764,7 @@ export function App() {
             setStatus(`${jobLabel}: ${message}`);
           },
           onLog: (message) => {
+            setExportLastLog(compactFfmpegLog(message));
             if (message.toLowerCase().includes('error')) {
               setExportPhase('error');
               setStatus(message);
@@ -1719,7 +1794,11 @@ export function App() {
 	      );
     } catch (error) {
       const message = error instanceof Error ? error.message : '';
-      if (message.includes('terminate') || message.includes('aborted')) {
+      if (
+        error instanceof ExportRenderError
+          ? error.kind === 'cancelled'
+          : message.includes('terminate') || message.includes('aborted')
+      ) {
         setExportPhase('cancelled');
         setStatus('MP4 내보내기를 취소했습니다.');
       } else {
@@ -1940,7 +2019,9 @@ export function App() {
       });
       setProjectCreatedAt(project.createdAt);
       setLastAutosavedAt(project.updatedAt);
-      setRestoredVideoName(project.videoName ?? null);
+      const projectVideoName = project.mediaMeta?.name ?? project.videoName ?? null;
+      setMediaMeta(project.mediaMeta ?? null);
+      setRestoredVideoName(projectVideoName);
       const firstSelection =
         project.videoClips?.[0]
           ? ({ kind: 'clip', id: project.videoClips[0].id } as const)
@@ -1961,23 +2042,23 @@ export function App() {
               ? 'video'
               : 'captions'
       );
-      if (project.videoName) {
+      if (projectVideoName) {
         setIsRestoringVideo(true);
-        setStatus(`자동 저장된 프로젝트를 복구했습니다. ${project.videoName} 자동 연결을 확인하는 중입니다.`);
+        setStatus(`자동 저장된 프로젝트를 복구했습니다. ${projectVideoName} 자동 연결을 확인하는 중입니다.`);
         void readAutosaveVideoFile()
           .then((file) => {
             if (cancelled) return;
 
             if (!file) {
               setStatus(
-                `자동 저장된 프로젝트를 복구했습니다. 원본 영상 "${project.videoName}"을 다시 연결하세요.`
+                `자동 저장된 프로젝트를 복구했습니다. 원본 영상 "${projectVideoName}"을 다시 연결하세요.`
               );
               return;
             }
 
-            if (file.name !== project.videoName) {
+            if (!doesFileMatchProjectMedia(file, project.mediaMeta, projectVideoName)) {
               setStatus(
-                `자동 저장된 프로젝트를 복구했습니다. 원본 영상 "${project.videoName}"을 다시 연결하세요.`
+                `자동 저장된 프로젝트를 복구했습니다. 저장된 원본과 파일명/크기/수정일이 맞는 "${projectVideoName}"을 다시 연결하세요.`
               );
               return;
             }
@@ -1987,7 +2068,7 @@ export function App() {
           .catch(() => {
             if (cancelled) return;
             setStatus(
-              `자동 저장된 프로젝트를 복구했습니다. 원본 영상 "${project.videoName}"을 다시 연결하세요.`
+              `자동 저장된 프로젝트를 복구했습니다. 원본 영상 "${projectVideoName}"을 다시 연결하세요.`
             );
           })
           .finally(() => {
@@ -2020,6 +2101,7 @@ export function App() {
       const project: ProjectFile = {
         version: 1,
         videoName: videoFile?.name ?? restoredVideoName ?? undefined,
+        mediaMeta: mediaMeta ?? undefined,
         cues,
         overlays,
         effects,
@@ -2039,6 +2121,7 @@ export function App() {
     effects,
     overlays,
     projectCreatedAt,
+    mediaMeta,
     restoredVideoName,
     transitions,
     videoClips,
@@ -2457,6 +2540,15 @@ export function App() {
                       width: element.videoWidth || defaultDimensions.width,
                       height: element.videoHeight || defaultDimensions.height
                     });
+                    setMediaMeta((current) =>
+                      videoFile
+                        ? createProjectMediaMeta(videoFile, {
+                            duration: sourceDuration,
+                            width: element.videoWidth || defaultDimensions.width,
+                            height: element.videoHeight || defaultDimensions.height
+                          })
+                        : current
+                    );
                     ensureDefaultClip(sourceDuration);
                   }}
                   onPlay={() => setIsPlaying(true)}
@@ -2677,6 +2769,7 @@ export function App() {
             onMoveEffect={(id, start, end, groupKey) =>
               updateEffect(id, { start, end }, groupKey)
             }
+            onThumbnailRequest={setThumbnailRequest}
             onSelect={selectTimelineItem}
           />
 
@@ -2690,6 +2783,14 @@ export function App() {
             )}
             {isExporting && (
               <span className="progress-pill">{Math.round(exportProgress * 100)}%</span>
+            )}
+            {(isExporting || exportPhase === 'error') && exportPreflightNote && (
+              <span className="export-note-pill">{exportPreflightNote}</span>
+            )}
+            {(isExporting || exportPhase === 'error') && exportLastLog && (
+              <span className="export-log-pill" title={exportLastLog}>
+                로그: {exportLastLog}
+              </span>
             )}
             {exportUrl && (
               <a href={exportUrl} download={exportDownloadName}>
@@ -2854,7 +2955,8 @@ function HelpPanel({
         <h2 id="help-panel-title">Edit Studio 사용법</h2>
         <p>
           영상 파일을 브라우저에서만 처리하면서 컷 편집, 자막, 텍스트, 클릭/터치 효과를
-          만들고 MP4로 저장하는 기본 흐름입니다.
+          만들고 MP4로 저장하는 기본 흐름입니다. GitHub Pages에서 열어도 영상은 각 사용자
+          컴퓨터의 브라우저 안에서만 처리됩니다.
         </p>
         <button type="button" className="help-tour-button" onClick={onStartGuide}>
           <CircleHelp size={16} />
@@ -3581,6 +3683,7 @@ function Timeline({
   onMoveCue,
   onMoveOverlay,
   onMoveEffect,
+  onThumbnailRequest,
   onSelect
 }: {
   videoClips: VideoClip[];
@@ -3604,6 +3707,7 @@ function Timeline({
   onMoveCue: (id: string, start: number, end: number, groupKey?: string) => void;
   onMoveOverlay: (id: string, start: number, end: number, groupKey?: string) => void;
   onMoveEffect: (id: string, start: number, end: number, groupKey?: string) => void;
+  onThumbnailRequest: (request: TimelineThumbnailRequest) => void;
   onSelect: (selection: Exclude<Selection, null>) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -3790,6 +3894,16 @@ function Timeline({
     setPxPerSecond(nextPxPerSecond);
     syncScrollLeft(0, nextPxPerSecond);
   }, [duration, viewportWidth]);
+
+  useEffect(() => {
+    if (!sourceDuration || !viewportWidth) return;
+
+    onThumbnailRequest({
+      start: visibleStart,
+      end: visibleEnd,
+      step: chooseThumbnailStepForPxPerSecond(pxPerSecond)
+    });
+  }, [onThumbnailRequest, pxPerSecond, sourceDuration, viewportWidth, visibleEnd, visibleStart]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -6175,8 +6289,29 @@ function isTimelineInteractiveTarget(target: EventTarget | null) {
   );
 }
 
-async function generateTimelineThumbnails(videoUrl: string, duration: number) {
+function getThumbnailStepForRange(start: number, end: number) {
+  const range = Math.max(1, end - start);
+  return clamp(range / 24, 1, 20);
+}
+
+function getThumbnailCacheKey(time: number) {
+  return Number(time.toFixed(2));
+}
+
+function pruneThumbnailCache(cache: Map<number, TimelineThumbnail>, desiredTimes: number[]) {
+  if (cache.size <= 140) return;
+
+  const keep = new Set(desiredTimes.map(getThumbnailCacheKey));
+  for (const key of cache.keys()) {
+    if (!keep.has(key)) {
+      cache.delete(key);
+    }
+  }
+}
+
+async function generateTimelineThumbnails(videoUrl: string, times: number[]) {
   if (typeof document === 'undefined') return [];
+  if (times.length === 0) return [];
 
   const video = document.createElement('video');
   video.preload = 'auto';
@@ -6194,14 +6329,6 @@ async function generateTimelineThumbnails(videoUrl: string, duration: number) {
       await waitForMediaEvent(video, 'loadeddata', 4000).catch(() => undefined);
     }
 
-    const safeDuration = Math.max(
-      MIN_CUE_DURATION,
-      Number.isFinite(video.duration) && video.duration > 0 ? video.duration : duration
-    );
-    const sampleCount = Math.min(
-      TIMELINE_MAX_THUMBNAILS,
-      Math.max(10, Math.ceil(safeDuration / 8))
-    );
     const canvas = document.createElement('canvas');
     canvas.width = TIMELINE_THUMBNAIL_WIDTH;
     canvas.height = TIMELINE_THUMBNAIL_HEIGHT;
@@ -6210,10 +6337,7 @@ async function generateTimelineThumbnails(videoUrl: string, duration: number) {
 
     const thumbnails: TimelineThumbnail[] = [];
 
-    for (let index = 0; index < sampleCount; index += 1) {
-      const ratio = sampleCount <= 1 ? 0 : index / (sampleCount - 1);
-      const time = clamp(ratio * safeDuration, 0, Math.max(0, safeDuration - 0.08));
-
+    for (const time of times.slice(0, TIMELINE_MAX_THUMBNAILS)) {
       await seekVideoForThumbnail(video, time);
       drawVideoThumbnailFrame(video, context, canvas.width, canvas.height);
 
@@ -6300,6 +6424,111 @@ function formatTimelineTick(seconds: number) {
 
 function isVideoFile(file: File) {
   return file.type.startsWith('video/') || /\.(mp4|m4v|mov|webm|mkv|avi)$/i.test(file.name);
+}
+
+function createProjectMediaMeta(
+  file: File,
+  details?: { duration?: number; width?: number; height?: number }
+): ProjectMediaMeta {
+  return {
+    name: file.name,
+    size: file.size,
+    lastModified: file.lastModified,
+    ...(details?.duration !== undefined ? { duration: details.duration } : {}),
+    ...(details?.width !== undefined ? { width: details.width } : {}),
+    ...(details?.height !== undefined ? { height: details.height } : {})
+  };
+}
+
+function doesFileMatchProjectMedia(
+  file: File | null,
+  expectedMeta?: ProjectMediaMeta,
+  fallbackName?: string | null
+) {
+  if (!file) return false;
+  if (!expectedMeta) return fallbackName ? file.name === fallbackName : true;
+
+  const nameMatches = file.name === expectedMeta.name;
+  const sizeMatches = expectedMeta.size <= 0 || file.size === expectedMeta.size;
+  const modifiedMatches =
+    expectedMeta.lastModified <= 0 ||
+    Math.abs(file.lastModified - expectedMeta.lastModified) < 2000;
+
+  return nameMatches && sizeMatches && modifiedMatches;
+}
+
+function getMediaRelinkMessage(
+  file: File,
+  expectedMeta: ProjectMediaMeta | null,
+  fallbackName: string | null
+) {
+  if (!expectedMeta) {
+    return fallbackName && file.name !== fallbackName
+      ? `${file.name} 연결됨. 저장된 원본명은 ${fallbackName}이라 결과가 다를 수 있습니다.`
+      : null;
+  }
+
+  const issues = [
+    file.name !== expectedMeta.name ? '파일명' : '',
+    expectedMeta.size > 0 && file.size !== expectedMeta.size ? '크기' : '',
+    expectedMeta.lastModified > 0 &&
+    Math.abs(file.lastModified - expectedMeta.lastModified) >= 2000
+      ? '수정일'
+      : ''
+  ].filter(Boolean);
+
+  return issues.length > 0
+    ? `${file.name} 연결됨. 저장된 원본(${expectedMeta.name})과 ${issues.join(
+        '/'
+      )}이 달라 결과가 다를 수 있습니다.`
+    : null;
+}
+
+async function detectVideoHasAudio(file: File): Promise<boolean | null> {
+  if (typeof document === 'undefined') return null;
+
+  const video = document.createElement('video');
+  const url = URL.createObjectURL(file);
+  video.preload = 'metadata';
+  video.muted = true;
+  video.src = url;
+
+  try {
+    await waitForMediaEvent(video, 'loadedmetadata', 3000);
+    const media = video as HTMLVideoElement & {
+      mozHasAudio?: boolean;
+      webkitAudioDecodedByteCount?: number;
+      audioTracks?: { length: number };
+    };
+
+    if (typeof media.audioTracks?.length === 'number') {
+      return media.audioTracks.length > 0;
+    }
+    if (typeof media.mozHasAudio === 'boolean') {
+      return media.mozHasAudio;
+    }
+    if (typeof media.webkitAudioDecodedByteCount === 'number') {
+      return media.webkitAudioDecodedByteCount > 0 ? true : null;
+    }
+
+    return null;
+  } catch {
+    return null;
+  } finally {
+    video.removeAttribute('src');
+    video.load();
+    URL.revokeObjectURL(url);
+  }
+}
+
+function formatExportPreflightNote(messages: string[], risk: 'low' | 'medium' | 'high') {
+  if (messages.length === 0) return '';
+  const label = risk === 'high' ? '위험 높음' : risk === 'medium' ? '주의' : '점검';
+  return `${label}: ${messages[0]}`;
+}
+
+function compactFfmpegLog(message: string) {
+  return message.replace(/\s+/g, ' ').trim().slice(0, 180);
 }
 
 function downloadText(content: string, fileName: string, type: string) {

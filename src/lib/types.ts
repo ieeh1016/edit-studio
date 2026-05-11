@@ -90,9 +90,19 @@ export interface InteractionEffect {
   label: string;
 }
 
+export interface ProjectMediaMeta {
+  name: string;
+  size: number;
+  lastModified: number;
+  duration?: number;
+  width?: number;
+  height?: number;
+}
+
 export interface ProjectFile {
   version: 1;
   videoName?: string;
+  mediaMeta?: ProjectMediaMeta;
   cues: CaptionCue[];
   overlays: TextOverlay[];
   effects: InteractionEffect[];

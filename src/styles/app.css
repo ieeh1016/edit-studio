@@ -2934,6 +2934,30 @@ body {
   color: #b4f4ff;
 }
 
+.export-note-pill,
+.export-log-pill {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 999px;
+  padding: 5px 9px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.export-note-pill {
+  border: 1px solid rgba(242, 193, 78, 0.24);
+  background: rgba(242, 193, 78, 0.11);
+  color: #ffe19a;
+}
+
+.export-log-pill {
+  border: 1px solid rgba(144, 155, 173, 0.22);
+  background: rgba(144, 155, 173, 0.1);
+  color: #c9d3e2;
+}
+
 .warning-pill {
   border: 1px solid rgba(255, 91, 125, 0.24);
   background: rgba(255, 91, 125, 0.12);

@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   TIMELINE_DEFAULT_PX_PER_SECOND,
   TIMELINE_MAX_PX_PER_SECOND,
+  chooseThumbnailStepForPxPerSecond,
   fitTimelinePxPerSecond,
   getVisibleTimelineRange,
+  getVisibleThumbnailTimes,
   layoutTimelineItems,
   timeToTimelineX,
   timelineXToTime,
@@ -92,6 +94,16 @@ describe('timeline viewport helpers', () => {
     });
 
     expect(next.pxPerSecond).toBe(TIMELINE_MAX_PX_PER_SECOND);
+  });
+
+  it('selects thumbnail samples only for the visible window', () => {
+    const step = chooseThumbnailStepForPxPerSecond(30);
+    const times = getVisibleThumbnailTimes(1800, { start: 600, end: 660, step });
+
+    expect(times[0]).toBeGreaterThanOrEqual(595);
+    expect(times[times.length - 1]).toBeLessThanOrEqual(665);
+    expect(times.length).toBeLessThan(20);
+    expect(times).not.toContain(0);
   });
 });
 

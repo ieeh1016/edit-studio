@@ -23,6 +23,7 @@ interface ExportOptions {
   preset: ExportPreset;
   dimensions: VideoDimensions;
   sourceDuration?: number;
+  hasAudio?: boolean;
   fontFiles?: File[];
   signal?: AbortSignal;
   onProgress?: (progress: number) => void;
@@ -31,6 +32,19 @@ interface ExportOptions {
 }
 
 type FFmpegInstance = import('@ffmpeg/ffmpeg').FFmpeg;
+export type ExportFailureKind = 'engine' | 'codec' | 'memory' | 'audio' | 'filter' | 'cancelled' | 'unknown';
+
+export class ExportRenderError extends Error {
+  kind: ExportFailureKind;
+  cause?: unknown;
+
+  constructor(kind: ExportFailureKind, message: string, options?: { cause?: unknown }) {
+    super(message);
+    this.name = 'ExportRenderError';
+    this.kind = kind;
+    this.cause = options?.cause;
+  }
+}
 
 let ffmpegInstancePromise: Promise<FFmpegInstance> | null = null;
 let activeFfmpeg: FFmpegInstance | null = null;
@@ -97,48 +111,64 @@ export async function exportVideoWithBurnedSubtitles(
       )
     ]);
 
-    options.onStatus?.('컷, 속도, 전환 필터를 구성하는 중');
-    options.onProgress?.(0.14);
-    const filterGraph = buildVideoEditFilterGraph({
-      clips,
-      transitions,
-      outputDimensions,
-      subtitleName,
-      fontDirName
-    });
+    const renderWithAudioMode = async (hasAudio: boolean) => {
+      options.onStatus?.('컷, 속도, 전환 필터를 구성하는 중');
+      options.onProgress?.(0.14);
+      const filterGraph = buildVideoEditFilterGraph({
+        clips,
+        transitions,
+        outputDimensions,
+        subtitleName,
+        fontDirName,
+        hasAudio
+      });
 
-    options.onStatus?.('MP4 렌더링 중');
-    const exitCode = await ffmpeg.exec(
-      [
-        '-i',
-        inputName,
-        '-sn',
-        '-filter_complex',
-        filterGraph,
-        '-map',
-        '[outv]',
-        '-map',
-        '[outa]',
-        '-c:v',
-        'libx264',
-        '-preset',
-        options.preset === 'fast720' ? 'veryfast' : 'medium',
-        '-crf',
-        options.preset === 'fast720' ? '24' : '21',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '160k',
-        '-movflags',
-        'faststart',
-        outputName
-      ],
-      -1,
-      { signal: options.signal }
-    );
+      options.onStatus?.('MP4 렌더링 중');
+      return ffmpeg.exec(
+        [
+          '-i',
+          inputName,
+          '-sn',
+          '-filter_complex',
+          filterGraph,
+          '-map',
+          '[outv]',
+          '-map',
+          '[outa]',
+          '-c:v',
+          'libx264',
+          '-preset',
+          options.preset === 'fast720' ? 'veryfast' : 'medium',
+          '-crf',
+          options.preset === 'fast720' ? '24' : '21',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '160k',
+          '-movflags',
+          'faststart',
+          outputName
+        ],
+        -1,
+        { signal: options.signal }
+      );
+    };
+
+    const assumedHasAudio = options.hasAudio ?? true;
+    let exitCode = await renderWithAudioMode(assumedHasAudio);
+
+    if (exitCode !== 0 && assumedHasAudio) {
+      options.onStatus?.('오디오 스트림을 찾지 못해 무음 트랙으로 다시 시도하는 중');
+      options.onLog?.('Retrying render with silent audio fallback.');
+      await ffmpeg.deleteFile(outputName).catch(() => undefined);
+      exitCode = await renderWithAudioMode(false);
+    }
 
     if (exitCode !== 0) {
-      throw new Error(`FFmpeg 렌더링 실패(exit code ${exitCode})`);
+      throw new ExportRenderError(
+        'filter',
+        `FFmpeg 필터 그래프 처리에 실패했습니다. 현재 코덱 또는 편집 구성이 브라우저 렌더러에서 처리되지 않을 수 있습니다. (exit code ${exitCode})`
+      );
     }
 
     options.onStatus?.('렌더 파일을 만드는 중');
@@ -152,12 +182,17 @@ export async function exportVideoWithBurnedSubtitles(
     options.onProgress?.(1);
     return new Blob([bytes], { type: 'video/mp4' });
   } catch (error) {
-    if (error instanceof Error && error.message.includes('FFmpeg 렌더링 실패')) {
-      throw new Error(
-        '현재 코덱 또는 브라우저 FFmpeg에서 해당 편집을 처리하지 못했습니다.'
-      );
+    if (error instanceof ExportRenderError) {
+      throw error;
     }
-    throw error;
+    if (error instanceof Error && /abort|terminate/i.test(error.message)) {
+      throw new ExportRenderError('cancelled', 'MP4 내보내기를 취소했습니다.', {
+        cause: error
+      });
+    }
+    throw new ExportRenderError(classifyFfmpegError(error), createExportErrorMessage(error), {
+      cause: error
+    });
   } finally {
     await Promise.allSettled([
       ffmpeg.deleteFile(inputName),
@@ -175,13 +210,15 @@ export function buildVideoEditFilterGraph({
   transitions,
   outputDimensions,
   subtitleName,
-  fontDirName
+  fontDirName,
+  hasAudio = true
 }: {
   clips: VideoClip[];
   transitions: ClipTransition[];
   outputDimensions: VideoDimensions;
   subtitleName: string;
   fontDirName?: string;
+  hasAudio?: boolean;
 }) {
   const normalizedTransitions = normalizeTransitionsForClips(clips, transitions);
   const parts: string[] = [];
@@ -197,7 +234,7 @@ export function buildVideoEditFilterGraph({
       }:${outputDimensions.height}:flags=lanczos,setsar=1,format=yuv420p[v${index}]`
     );
 
-    if (clip.muted) {
+    if (clip.muted || !hasAudio) {
       parts.push(
         `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${formatFilterNumber(
           outputDuration
@@ -368,7 +405,8 @@ export function cancelActiveExport() {
 }
 
 async function fetchFont() {
-  const response = await fetch('/fonts/AppleGothic.ttf');
+  const fontUrl = `${import.meta.env.BASE_URL}fonts/AppleGothic.ttf`;
+  const response = await fetch(fontUrl);
   if (!response.ok) {
     throw new Error('한국어 폰트 파일을 불러오지 못했습니다.');
   }
@@ -382,4 +420,32 @@ function needsScale(source: VideoDimensions, output: VideoDimensions) {
 
 function ensureEven(value: number) {
   return Math.max(2, Math.round(value / 2) * 2);
+}
+
+function classifyFfmpegError(error: unknown): ExportFailureKind {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+
+  if (/abort|terminate/.test(lower)) return 'cancelled';
+  if (/memory|allocation|out of bounds/.test(lower)) return 'memory';
+  if (/stream specifier.*:a|matches no streams|audio/.test(lower)) return 'audio';
+  if (/filter|subtitles|xfade|concat|graph/.test(lower)) return 'filter';
+  if (/codec|invalid data|could not find|moov atom|demux/.test(lower)) return 'codec';
+  if (/ffmpeg|worker|wasm|load|loading/.test(lower)) return 'engine';
+  return 'unknown';
+}
+
+function createExportErrorMessage(error: unknown) {
+  const kind = classifyFfmpegError(error);
+  const messages: Record<ExportFailureKind, string> = {
+    engine: 'FFmpeg 엔진을 불러오지 못했습니다. 새로고침 후 다시 시도해 주세요.',
+    codec: '현재 코덱을 브라우저 FFmpeg에서 읽지 못했습니다. MP4/H.264 영상으로 변환 후 다시 시도해 주세요.',
+    memory: '브라우저 메모리가 부족해 렌더링이 중단되었습니다. 720p 빠른 렌더 또는 짧은 구간 저장을 먼저 시도해 주세요.',
+    audio: '원본 오디오 스트림 처리에 실패했습니다. 무음 fallback으로 다시 렌더할 수 있도록 영상을 다시 불러와 시도해 주세요.',
+    filter: '컷, 전환, 자막 필터 처리에 실패했습니다. 전환을 줄이거나 짧은 구간으로 먼저 확인해 주세요.',
+    cancelled: 'MP4 내보내기를 취소했습니다.',
+    unknown: 'MP4 내보내기에 실패했습니다. 마지막 FFmpeg 로그를 확인해 주세요.'
+  };
+
+  return messages[kind];
 }
