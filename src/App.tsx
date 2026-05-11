@@ -145,6 +145,11 @@ type TimelineTrackKind = 'video' | 'cue' | 'overlay' | 'effect';
 type TimelineTrackHeights = Record<TimelineTrackKind, number>;
 type TimelineThumbnail = { time: number; url: string };
 type TimelineThumbnailRequest = TimelineThumbnailWindow;
+type PreviewGuideState = {
+  vertical?: number;
+  horizontal?: number;
+  label: string;
+} | null;
 type VideoImportMode = 'normal' | 'relink';
 type PendingResetAction =
   | { kind: 'reset-project' }
@@ -308,11 +313,11 @@ const helpSections = [
   },
   {
     title: '타임라인',
-    body: '휠/트랙패드로 좌우 이동, Ctrl 또는 Cmd+휠로 커서 기준 확대/축소, Fit으로 전체 보기, 트랙 경계 드래그로 높이 조절을 할 수 있습니다.'
+    body: '휠/트랙패드로 좌우 이동, Ctrl 또는 Cmd+휠로 커서 기준 확대/축소, Fit으로 전체 보기, 트랙 경계 드래그로 높이 조절을 할 수 있습니다. Space 재생, S 분할, I/O 구간 지정, Delete 삭제도 지원합니다.'
   },
   {
     title: '자막/텍스트/효과',
-    body: '자막은 시간과 스타일을, 텍스트와 효과는 미리보기 위치/크기와 타임라인 시작·종료 시간을 함께 조절합니다.'
+    body: '자막은 시간과 스타일을, 텍스트와 효과는 미리보기 위치/크기와 타임라인 시작·종료 시간을 함께 조절합니다. 미리보기에서 이동할 때 중앙선과 안전 영역에 가까우면 스냅 가이드가 표시됩니다.'
   },
   {
     title: '저장/초기화',
@@ -462,6 +467,7 @@ export function App() {
   const [isGuideActive, setIsGuideActive] = useState(false);
   const [guideStepIndex, setGuideStepIndex] = useState(0);
   const [guideTargetRect, setGuideTargetRect] = useState<GuideRect | null>(null);
+  const [previewGuide, setPreviewGuide] = useState<PreviewGuideState>(null);
 
   const cues = editorHistory.present.cues;
   const overlays = editorHistory.present.overlays;
@@ -736,12 +742,21 @@ export function App() {
       if (isHelpOpen) {
         event.preventDefault();
         setIsHelpOpen(false);
+        return;
+      }
+
+      if (selection || cutRange.start !== null || cutRange.end !== null || previewGuide) {
+        event.preventDefault();
+        setSelection(null);
+        setPreviewGuide(null);
+        setCutRange({ start: null, end: null });
+        setStatus('선택과 제거 범위를 해제했습니다.');
       }
     };
 
     window.addEventListener('keydown', handleEscape);
     return () => window.removeEventListener('keydown', handleEscape);
-  }, [isGuideActive, isHelpOpen]);
+  }, [cutRange.end, cutRange.start, isGuideActive, isHelpOpen, previewGuide, selection]);
 
   function openVideoPicker(mode: VideoImportMode = 'normal') {
     videoImportModeRef.current = mode;
@@ -1511,12 +1526,18 @@ export function App() {
         videoClips: result.clips,
         transitions: result.transitions
       }));
+      setSelection(null);
+      setStatus('선택한 영상 조각을 삭제하고 뒤 조각을 앞으로 붙였습니다.');
+      return;
     }
     if (selectedCue) {
       commitEditor((snapshot) => ({
         ...snapshot,
         cues: snapshot.cues.filter((cue) => cue.id !== selectedCue.id)
       }));
+      setSelection(null);
+      setStatus('선택한 자막을 삭제했습니다.');
+      return;
     }
     if (selectedOverlay) {
       commitEditor((snapshot) => ({
@@ -1525,12 +1546,20 @@ export function App() {
           (overlay) => overlay.id !== selectedOverlay.id
         )
       }));
+      setSelection(null);
+      setPreviewGuide(null);
+      setStatus('선택한 텍스트를 삭제했습니다.');
+      return;
     }
     if (selectedEffect) {
       commitEditor((snapshot) => ({
         ...snapshot,
         effects: snapshot.effects.filter((effect) => effect.id !== selectedEffect.id)
       }));
+      setSelection(null);
+      setPreviewGuide(null);
+      setStatus('선택한 효과를 삭제했습니다.');
+      return;
     }
     setSelection(null);
   }
@@ -1565,6 +1594,22 @@ export function App() {
         end: currentTime + Math.max(length, MIN_CUE_DURATION)
       });
     }
+  }
+
+  function moveOverlayWithPreviewGuides(id: string, x: number, y: number) {
+    const next = snapPreviewPosition(x, y);
+    setPreviewGuide(next.guide);
+    updateOverlay(id, { x: next.x, y: next.y }, `overlay-position:${id}`);
+  }
+
+  function moveEffectWithPreviewGuides(id: string, x: number, y: number) {
+    const next = snapPreviewPosition(x, y);
+    setPreviewGuide(next.guide);
+    updateEffect(id, { x: next.x, y: next.y }, `effect-position:${id}`);
+  }
+
+  function clearPreviewGuides() {
+    setPreviewGuide(null);
   }
 
   async function importSubtitles(file: File) {
@@ -2184,9 +2229,10 @@ export function App() {
       }
 
       if (event.key === 'Delete' || event.key === 'Backspace') {
-        if (selection) {
+        if (selection || hasCutRange) {
           event.preventDefault();
-          deleteSelection();
+          if (selection) deleteSelection();
+          else removeMarkedCutRange();
         }
         return;
       }
@@ -2206,6 +2252,11 @@ export function App() {
       if (key === 'e') {
         event.preventDefault();
         addInteractionEffect('tap');
+      }
+
+      if (key === 's') {
+        event.preventDefault();
+        splitClipAtPlayhead();
       }
 
       if (key === 'i') {
@@ -2568,6 +2619,24 @@ export function App() {
                   />
                 )}
                 <div className="overlay-layer">
+                  {(selectedOverlay || selectedEffect) && (
+                    <span className="preview-safe-frame" aria-hidden="true" />
+                  )}
+                  {previewGuide?.vertical !== undefined && (
+                    <span
+                      className="preview-align-guide vertical"
+                      style={{ left: `${previewGuide.vertical}%` }}
+                      aria-hidden="true"
+                    />
+                  )}
+                  {previewGuide?.horizontal !== undefined && (
+                    <span
+                      className="preview-align-guide horizontal"
+                      style={{ top: `${previewGuide.horizontal}%` }}
+                      aria-hidden="true"
+                    />
+                  )}
+                  {previewGuide && <span className="preview-guide-label">{previewGuide.label}</span>}
                   {activeCues.map((cue) => (
                     <CaptionPreview key={cue.id} cue={cue} />
                   ))}
@@ -2580,9 +2649,8 @@ export function App() {
                         setSelection({ kind: 'overlay', id: overlay.id });
                         setPanelMode('texts');
                       }}
-                      onMove={(x, y) =>
-                        updateOverlay(overlay.id, { x, y }, `overlay-position:${overlay.id}`)
-                      }
+                      onMove={(x, y) => moveOverlayWithPreviewGuides(overlay.id, x, y)}
+                      onMoveEnd={clearPreviewGuides}
                       onResize={(scaleX, scaleY) =>
                         updateOverlay(
                           overlay.id,
@@ -2601,9 +2669,8 @@ export function App() {
                       onSelect={() => {
                         selectEffect(effect.id);
                       }}
-                      onMove={(x, y) =>
-                        updateEffect(effect.id, { x, y }, `effect-position:${effect.id}`)
-                      }
+                      onMove={(x, y) => moveEffectWithPreviewGuides(effect.id, x, y)}
+                      onMoveEnd={clearPreviewGuides}
                       onResize={(size) =>
                         updateEffect(effect.id, { size }, `effect-size:${effect.id}`)
                       }
@@ -2735,6 +2802,14 @@ export function App() {
                 </button>
               </div>
             </div>
+          </div>
+          <div className="shortcut-hints" aria-label="편집 단축키">
+            <span><kbd>Space</kbd>재생</span>
+            <span><kbd>S</kbd>분할</span>
+            <span><kbd>I</kbd>IN</span>
+            <span><kbd>O</kbd>OUT</span>
+            <span><kbd>Del</kbd>삭제</span>
+            <span><kbd>Esc</kbd>해제</span>
           </div>
           {(cutRange.start !== null || cutRange.end !== null) && (
             <div className={`cut-range-status ${hasCutRange ? 'ready' : 'pending'}`}>
@@ -3153,12 +3228,14 @@ function TextPreview({
   selected,
   onSelect,
   onMove,
+  onMoveEnd,
   onResize
 }: {
   overlay: TextOverlay;
   selected: boolean;
   onSelect: () => void;
   onMove: (x: number, y: number) => void;
+  onMoveEnd: () => void;
   onResize: (scaleX: number, scaleY: number) => void;
 }) {
   const dragStartRef = useRef<{
@@ -3295,9 +3372,11 @@ function TextPreview({
           event.currentTarget.releasePointerCapture(event.pointerId);
         }
         dragStartRef.current = null;
+        onMoveEnd();
       }}
       onPointerCancel={() => {
         dragStartRef.current = null;
+        onMoveEnd();
       }}
     >
       {overlay.text}
@@ -3356,6 +3435,7 @@ function InteractionEffectPreview({
   replayToken,
   onSelect,
   onMove,
+  onMoveEnd,
   onResize
 }: {
   effect: InteractionEffect;
@@ -3363,6 +3443,7 @@ function InteractionEffectPreview({
   replayToken: number;
   onSelect: () => void;
   onMove: (x: number, y: number) => void;
+  onMoveEnd: () => void;
   onResize: (size: number) => void;
 }) {
   const resizeStartRef = useRef<{
@@ -3441,6 +3522,10 @@ function InteractionEffectPreview({
           event.stopPropagation();
           event.currentTarget.releasePointerCapture(event.pointerId);
         }
+        onMoveEnd();
+      }}
+      onPointerCancel={() => {
+        onMoveEnd();
       }}
     >
       {isArtworkEffect(effect.kind) && (
@@ -6424,6 +6509,52 @@ function formatTimelineTick(seconds: number) {
 
 function isVideoFile(file: File) {
   return file.type.startsWith('video/') || /\.(mp4|m4v|mov|webm|mkv|avi)$/i.test(file.name);
+}
+
+function snapPreviewPosition(x: number, y: number) {
+  let nextX = clamp(x, 0, 100);
+  let nextY = clamp(y, 0, 100);
+  const guide: NonNullable<PreviewGuideState> = { label: '' };
+  const centerThreshold = 2;
+  const safeThreshold = 1.5;
+
+  if (Math.abs(nextX - 50) <= centerThreshold) {
+    nextX = 50;
+    guide.vertical = 50;
+  } else if (Math.abs(nextX - 10) <= safeThreshold) {
+    nextX = 10;
+    guide.vertical = 10;
+  } else if (Math.abs(nextX - 90) <= safeThreshold) {
+    nextX = 90;
+    guide.vertical = 90;
+  }
+
+  if (Math.abs(nextY - 50) <= centerThreshold) {
+    nextY = 50;
+    guide.horizontal = 50;
+  } else if (Math.abs(nextY - 10) <= safeThreshold) {
+    nextY = 10;
+    guide.horizontal = 10;
+  } else if (Math.abs(nextY - 90) <= safeThreshold) {
+    nextY = 90;
+    guide.horizontal = 90;
+  }
+
+  if (guide.vertical === 50 && guide.horizontal === 50) {
+    guide.label = '정중앙 스냅';
+  } else if (guide.vertical === 50) {
+    guide.label = '가로 중앙 스냅';
+  } else if (guide.horizontal === 50) {
+    guide.label = '세로 중앙 스냅';
+  } else if (guide.vertical !== undefined || guide.horizontal !== undefined) {
+    guide.label = '안전 영역 스냅';
+  }
+
+  return {
+    x: nextX,
+    y: nextY,
+    guide: guide.label ? guide : null
+  };
 }
 
 function createProjectMediaMeta(
