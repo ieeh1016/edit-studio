@@ -63,7 +63,9 @@ import {
 import {
   builtinFontAsset,
   fontDownloadLinks,
-  getFontFamilyFromFile,
+  fontWeightOptions,
+  getFontMetadataFromFile,
+  getFontWeightLabel,
   isSupportedFontFile,
   type AppFontAsset
 } from './lib/fonts';
@@ -91,6 +93,7 @@ import {
   defaultInteractionEffect,
   defaultTextOverlay,
   interactionEffectPresets,
+  builtinPreviewFontFamily,
   type CaptionCue,
   type CaptionPosition,
   type CaptionStyle,
@@ -885,33 +888,46 @@ export function App() {
     const url = URL.createObjectURL(file);
 
     try {
-      const family = await getFontFamilyFromFile(file);
-      const face = new FontFace(family, `url(${url})`);
+      const meta = await getFontMetadataFromFile(file);
+      const face = new FontFace(meta.family, `url(${url})`, {
+        style: meta.style,
+        weight: String(meta.weight)
+      });
       await face.load();
       document.fonts.add(face);
       importedFontUrlsRef.current.push(url);
 
       const fontAsset: AppFontAsset = {
         id: crypto.randomUUID(),
-        family,
-        exportFamily: family,
-        displayName: family,
+        ...meta,
         source: 'local',
         file
       };
 
-      setFontAssets((previous) => [
-        ...previous.filter((asset) => asset.family !== family),
-        fontAsset
-      ]);
+      setFontAssets((previous) => {
+        const sameVariant = (asset: AppFontAsset) =>
+          asset.family === fontAsset.family &&
+          asset.weight === fontAsset.weight &&
+          asset.style === fontAsset.style &&
+          asset.source === fontAsset.source;
+
+        return [...previous.filter((asset) => !sameVariant(asset)), fontAsset];
+      });
 
       if (selectedCue) {
-        updateCueStyle(selectedCue.id, { fontFamily: family });
+        updateCueStyle(selectedCue.id, {
+          fontFamily: meta.family,
+          fontWeight: meta.weight
+        });
       } else if (selectedOverlay) {
-        updateOverlay(selectedOverlay.id, { fontFamily: family });
+        updateOverlay(selectedOverlay.id, {
+          fontFamily: meta.family,
+          fontWeight: meta.weight,
+          italic: meta.style === 'italic'
+        });
       }
 
-      setStatus(`${family} 폰트 가져옴`);
+      setStatus(`${fontAsset.displayName} 폰트 가져옴`);
     } catch {
       URL.revokeObjectURL(url);
       setStatus('폰트 파일을 읽지 못했습니다.');
@@ -3165,8 +3181,19 @@ function FontManager({
       </div>
       <div className="font-chip-row">
         {fonts.map((font) => (
-          <span key={font.id} style={{ fontFamily: font.family }}>
-            {font.displayName}
+          <span
+            key={font.id}
+            style={{
+              fontFamily: font.family,
+              fontWeight: font.weight,
+              fontStyle: font.style
+            }}
+          >
+            <strong>{font.displayName}</strong>
+            <small>
+              {font.weight} · {getFontWeightLabel(font.weight)}
+              {font.style === 'italic' ? ' Italic' : ''}
+            </small>
           </span>
         ))}
       </div>
@@ -3188,6 +3215,7 @@ function CaptionPreview({ cue }: { cue: CaptionCue }) {
       className={`caption-preview caption-${cue.position}`}
       style={{
         fontFamily: cue.style.fontFamily,
+        fontWeight: cue.style.fontWeight ?? defaultCaptionStyle.fontWeight,
         color: cue.style.color,
         background: cue.style.background,
         fontSize: cue.style.fontSize,
@@ -5558,6 +5586,18 @@ function CaptionPanel({
               </button>
             ))}
           </div>
+          <FontWeightSelect
+            family={selectedCue.style.fontFamily}
+            fonts={fonts}
+            value={selectedCue.style.fontWeight ?? defaultCaptionStyle.fontWeight}
+            onChange={(fontWeight) =>
+              onUpdateStyle(
+                selectedCue.id,
+                { fontWeight },
+                `cue-weight:${selectedCue.id}`
+              )
+            }
+          />
           <StyleControls
             style={selectedCue.style}
             fonts={fonts}
@@ -5751,19 +5791,14 @@ function OverlayPanel({
             </div>
           </section>
           <div className="text-decoration-panel">
-            <Segmented
-              label="굵기"
-              value={String(selectedOverlay.fontWeight ?? defaultTextOverlay.fontWeight)}
-              options={[
-                ['400', 'Regular'],
-                ['600', 'Semi'],
-                ['700', 'Bold'],
-                ['900', 'Black']
-              ]}
-              onChange={(value) =>
+            <FontWeightSelect
+              family={selectedOverlay.fontFamily}
+              fonts={fonts}
+              value={selectedOverlay.fontWeight ?? defaultTextOverlay.fontWeight}
+              onChange={(fontWeight) =>
                 onUpdate(
                   selectedOverlay.id,
-                  { fontWeight: Number(value) },
+                  { fontWeight },
                   `overlay-weight:${selectedOverlay.id}`
                 )
               }
@@ -5975,6 +6010,41 @@ function EffectPanel({
   );
 }
 
+function FontWeightSelect({
+  family,
+  fonts,
+  value,
+  onChange
+}: {
+  family: string;
+  fonts: AppFontAsset[];
+  value: number;
+  onChange: (fontWeight: number) => void;
+}) {
+  const availableWeights = new Set(
+    fonts
+      .filter((font) => font.family === family)
+      .map((font) => font.weight)
+  );
+
+  return (
+    <label>
+      굵기
+      <select
+        value={String(value)}
+        onChange={(event) => onChange(Number(event.target.value))}
+      >
+        {fontWeightOptions.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.value} · {option.label}
+            {availableWeights.has(option.value) ? ' · 파일 있음' : ''}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function StyleControls({
   style,
   fonts,
@@ -6006,18 +6076,7 @@ function StyleControls({
     >
   ) => void;
 }) {
-	  const fontOptions = fonts.some((font) => font.family === style.fontFamily)
-	    ? fonts
-    : [
-        ...fonts,
-        {
-          id: `missing-${style.fontFamily}`,
-          family: style.fontFamily,
-          exportFamily: style.fontFamily,
-          displayName: `${style.fontFamily} 파일 필요`,
-          source: 'local' as const
-	        }
-	      ];
+  const fontOptions = getFontFamilyOptions(fonts, style.fontFamily);
 	  const backgroundOpacity = getCssOpacity(style.background, 1);
 	  const backgroundEnabled = backgroundOpacity > 0.01;
 	  const backgroundColor = toColorInput(style.background, '#101216');
@@ -6032,7 +6091,7 @@ function StyleControls({
           onChange={(event) => onChange({ fontFamily: event.target.value })}
         >
           {fontOptions.map((font) => (
-            <option key={font.id} value={font.family}>
+            <option key={font.family} value={font.family}>
               {font.displayName}
             </option>
           ))}
@@ -6509,6 +6568,40 @@ function formatTimelineTick(seconds: number) {
 
 function isVideoFile(file: File) {
   return file.type.startsWith('video/') || /\.(mp4|m4v|mov|webm|mkv|avi)$/i.test(file.name);
+}
+
+function getFontFamilyOptions(fonts: AppFontAsset[], currentFamily: string) {
+  const grouped = new Map<
+    string,
+    { family: string; displayName: string; variantCount: number; source: AppFontAsset['source'] }
+  >();
+
+  fonts.forEach((font) => {
+    const current = grouped.get(font.family);
+    grouped.set(font.family, {
+      family: font.family,
+      displayName: font.family === builtinPreviewFontFamily ? font.displayName : font.family,
+      variantCount: (current?.variantCount ?? 0) + 1,
+      source: current?.source === 'builtin' ? 'builtin' : font.source
+    });
+  });
+
+  if (currentFamily && !grouped.has(currentFamily)) {
+    grouped.set(currentFamily, {
+      family: currentFamily,
+      displayName: `${currentFamily} 파일 필요`,
+      variantCount: 0,
+      source: 'local'
+    });
+  }
+
+  return Array.from(grouped.values()).map((font) => ({
+    family: font.family,
+    displayName:
+      font.variantCount > 1
+        ? `${font.displayName} (${font.variantCount} weights)`
+        : font.displayName
+  }));
 }
 
 function snapPreviewPosition(x: number, y: number) {

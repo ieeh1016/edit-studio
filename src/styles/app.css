@@ -1307,15 +1307,32 @@ select:focus-visible {
 }
 
 .font-chip-row span {
+  display: inline-grid;
+  gap: 1px;
   max-width: 100%;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: 8px;
   background: #eef2ea;
   color: var(--muted);
   padding: 5px 8px;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.font-chip-row strong {
+  overflow: hidden;
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+}
+
+.font-chip-row small {
+  color: currentColor;
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0.68;
 }
 
 .panel-tabs {

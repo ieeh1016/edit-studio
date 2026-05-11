@@ -23,6 +23,7 @@ export const builtinExportFontFamily = 'AppleGothic';
 export interface CaptionStyle {
   fontFamily: string;
   fontSize: number;
+  fontWeight: number;
   color: string;
   background: string;
   outlineColor: string;
@@ -128,6 +129,7 @@ export interface VideoDimensions {
 export const defaultCaptionStyle: CaptionStyle = {
   fontFamily: builtinPreviewFontFamily,
   fontSize: 46,
+  fontWeight: 700,
   color: '#ffffff',
   background: 'rgba(18, 20, 24, 0.72)',
   outlineColor: '#111111',

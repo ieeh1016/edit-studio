@@ -72,6 +72,7 @@ function captionCueToDialogue(cue: CaptionCue) {
     `\\an${alignment}`,
     `\\fn${escapeAssFontName(resolveAssFontFamily(cue.style.fontFamily))}`,
     `\\fs${Math.round(cue.style.fontSize)}`,
+    `\\b${normalizeAssFontWeight(cue.style.fontWeight ?? 400)}`,
     `\\c${hexToAssColor(cue.style.color)}`,
     `\\3c${hexToAssColor(cue.style.outlineColor)}`,
     `\\4c${hexToAssColor(cue.style.background)}`,
@@ -89,13 +90,13 @@ function overlayToDialogue(overlay: TextOverlay, dimensions: VideoDimensions) {
   const y = Math.round((overlay.y / 100) * dimensions.height);
   const scaleX = clamp(overlay.scaleX ?? 1, 0.25, 4);
   const scaleY = clamp(overlay.scaleY ?? 1, 0.25, 4);
-  const fontWeight = overlay.fontWeight ?? 400;
+  const fontWeight = normalizeAssFontWeight(overlay.fontWeight ?? 400);
   const tags = [
     `\\an${getOverlayAlignment(overlay.align ?? 'center')}`,
     `\\pos(${x},${y})`,
     `\\fn${escapeAssFontName(resolveAssFontFamily(overlay.fontFamily))}`,
     `\\fs${Math.round(overlay.fontSize)}`,
-    `\\b${fontWeight >= 700 ? 1 : 0}`,
+    `\\b${fontWeight}`,
     `\\i${overlay.italic ? 1 : 0}`,
     `\\u${overlay.underline ? 1 : 0}`,
     `\\fscx${Math.round(scaleX * 100)}`,
@@ -180,6 +181,10 @@ function resolveAssFontFamily(fontFamily: string) {
 
 function escapeAssFontName(fontFamily: string) {
   return fontFamily.replace(/[{}\\]/g, '').trim() || defaultExportFontFamily;
+}
+
+function normalizeAssFontWeight(weight: number) {
+  return clamp(Math.round(weight / 100) * 100, 100, 900);
 }
 
 function normalizeHex(color: string) {

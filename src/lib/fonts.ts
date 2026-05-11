@@ -8,15 +8,33 @@ export interface AppFontAsset {
   family: string;
   exportFamily: string;
   displayName: string;
+  variantName: string;
+  weight: number;
+  style: 'normal' | 'italic';
   source: 'builtin' | 'local';
   file?: File;
 }
+
+export const fontWeightOptions = [
+  { value: 100, label: 'Thin' },
+  { value: 200, label: 'ExtraLight' },
+  { value: 300, label: 'Light' },
+  { value: 400, label: 'Regular' },
+  { value: 500, label: 'Medium' },
+  { value: 600, label: 'SemiBold' },
+  { value: 700, label: 'Bold' },
+  { value: 800, label: 'ExtraBold' },
+  { value: 900, label: 'Black' }
+];
 
 export const builtinFontAsset: AppFontAsset = {
   id: 'builtin-applegothic',
   family: builtinPreviewFontFamily,
   exportFamily: builtinExportFontFamily,
   displayName: 'AppleGothic 기본',
+  variantName: 'Regular',
+  weight: 400,
+  style: 'normal',
   source: 'builtin'
 };
 
@@ -44,8 +62,73 @@ export async function getFontFamilyFromFile(file: File) {
   return extractSfntFamilyName(buffer) ?? stripFontExtension(file.name);
 }
 
+export async function getFontMetadataFromFile(file: File) {
+  const rawFamily = await getFontFamilyFromFile(file);
+  const inferred = inferFontVariantFromName(`${file.name} ${rawFamily}`);
+  const family = normalizeFontFamilyName(rawFamily);
+  const variantName = getFontWeightLabel(inferred.weight);
+  const displayName =
+    inferred.weight === 400 && inferred.style === 'normal'
+      ? family
+      : `${family} ${variantName}${inferred.style === 'italic' ? ' Italic' : ''}`;
+
+  return {
+    family,
+    exportFamily: family,
+    displayName,
+    variantName,
+    weight: inferred.weight,
+    style: inferred.style
+  };
+}
+
 export function stripFontExtension(name: string) {
   return name.replace(/\.(ttf|otf)$/i, '').trim() || 'Imported Font';
+}
+
+export function inferFontVariantFromName(name: string) {
+  const normalized = stripFontExtension(name)
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .toLowerCase();
+  const packed = normalized.replace(/\s+/g, '');
+  const style: AppFontAsset['style'] =
+    /\bitalic\b|\boblique\b/.test(normalized) ? 'italic' : 'normal';
+
+  const weightMatchers: Array<[number, RegExp]> = [
+    [200, /(extra|ultra)\s*light|extralight|ultralight/],
+    [800, /(extra|ultra)\s*bold|extrabold|ultrabold/],
+    [600, /semi\s*bold|demi\s*bold|semibold|demibold/],
+    [100, /thin|hairline/],
+    [300, /light/],
+    [500, /medium/],
+    [700, /bold/],
+    [900, /black|heavy/],
+    [400, /regular|normal|book/]
+  ];
+
+  const weight = weightMatchers.find(([, matcher]) => matcher.test(packed))?.[0] ?? 400;
+  return { weight, style };
+}
+
+export function getFontWeightLabel(weight: number) {
+  return (
+    fontWeightOptions.find((option) => option.value === weight)?.label ??
+    `${Math.round(weight)}`
+  );
+}
+
+function normalizeFontFamilyName(name: string) {
+  const trimmed = stripFontExtension(name)
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const variantTail =
+    /\s+(Thin|Hairline|Extra\s*Light|Ultra\s*Light|Light|Regular|Normal|Book|Medium|Semi\s*Bold|Demi\s*Bold|Bold|Extra\s*Bold|Ultra\s*Bold|Black|Heavy|Italic|Oblique)+$/i;
+  const normalized = trimmed.replace(variantTail, '').trim();
+  return normalized || trimmed || 'Imported Font';
 }
 
 function extractSfntFamilyName(buffer: ArrayBuffer) {

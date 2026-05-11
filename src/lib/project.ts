@@ -222,6 +222,11 @@ function normalizeCaptionStyle(input: unknown): CaptionStyle {
   return {
     fontFamily: stringOr(source.fontFamily, builtinPreviewFontFamily),
     fontSize: clamp(finiteNumber(source.fontSize, defaultCaptionStyle.fontSize), 10, 180),
+    fontWeight: clamp(
+      finiteNumber(source.fontWeight, defaultCaptionStyle.fontWeight),
+      100,
+      900
+    ),
     color: colorOr(source.color, defaultCaptionStyle.color),
     background: cssColorOr(source.background, defaultCaptionStyle.background),
     outlineColor: colorOr(source.outlineColor, defaultCaptionStyle.outlineColor),

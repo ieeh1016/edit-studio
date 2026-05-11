@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildAssScript, escapeAssText, hexToAssColor } from '../src/lib/ass';
 import { getCueDiagnostics } from '../src/lib/diagnostics';
 import { createExportPreflightResult } from '../src/lib/export-preflight';
+import { inferFontVariantFromName } from '../src/lib/fonts';
 import { buildVideoEditFilterGraph, getExportDimensions } from '../src/lib/ffmpeg';
 import {
   commitEditorHistory,
@@ -161,7 +162,7 @@ describe('ASS export helpers', () => {
     expect(script).toContain('한국어 자막');
     expect(script).toContain('\\fnAppleGothic');
     expect(script).toContain('\\an4');
-    expect(script).toContain('\\b1');
+    expect(script).toContain('\\b900');
     expect(script).toContain('\\i1');
     expect(script).toContain('\\u1');
     expect(script).toContain('\\pos(960,216)');
@@ -194,6 +195,7 @@ describe('project file normalization', () => {
           position: 'floating',
           style: {
             fontSize: 999,
+            fontWeight: 50,
             color: 'red',
             background: 'not-a-color',
             outlineWidth: -10,
@@ -261,6 +263,7 @@ describe('project file normalization', () => {
     expect(project.cues[0].position).toBe('bottom');
     expect(project.cues[0].style.fontFamily).toBe('AppleGothicLocal');
     expect(project.cues[0].style.fontSize).toBe(180);
+    expect(project.cues[0].style.fontWeight).toBe(100);
     expect(project.cues[0].style.color).toBe('#ffffff');
     expect(project.overlays[0].x).toBe(0);
     expect(project.overlays[0].y).toBe(100);
@@ -279,6 +282,27 @@ describe('project file normalization', () => {
     expect(project.videoClips?.[0].muted).toBe(true);
     expect(project.transitions?.[0].kind).toBe('fade');
     expect(project.transitions?.[0].duration).toBeLessThanOrEqual(0.5);
+  });
+});
+
+describe('font variant helpers', () => {
+  it('infers common Korean font weights and italic styles from file names', () => {
+    expect(inferFontVariantFromName('NotoSansKR-Thin.ttf')).toEqual({
+      weight: 100,
+      style: 'normal'
+    });
+    expect(inferFontVariantFromName('Pretendard-ExtraLight.otf')).toEqual({
+      weight: 200,
+      style: 'normal'
+    });
+    expect(inferFontVariantFromName('Noto Sans KR SemiBold Italic.ttf')).toEqual({
+      weight: 600,
+      style: 'italic'
+    });
+    expect(inferFontVariantFromName('NanumGothic-Black.otf')).toEqual({
+      weight: 900,
+      style: 'normal'
+    });
   });
 });
 
