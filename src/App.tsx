@@ -153,6 +153,7 @@ type PreviewGuideState = {
   horizontal?: number;
   label: string;
 } | null;
+type PreviewSize = 'small' | 'medium' | 'large' | 'fill';
 type VideoImportMode = 'normal' | 'relink';
 type PendingResetAction =
   | { kind: 'reset-project' }
@@ -237,6 +238,7 @@ const AUTOSAVE_VIDEO_DB_NAME = 'edit-studio:auto-save-video:v1';
 const AUTOSAVE_VIDEO_STORE_NAME = 'media';
 const AUTOSAVE_VIDEO_KEY = 'current-video';
 const ONBOARDING_KEY = 'edit-studio:onboarding-complete:v1';
+const PREVIEW_SIZE_KEY = 'edit-studio:preview-size:v1';
 const HISTORY_GROUP_WINDOW_MS = 900;
 const ONE_SHOT_EFFECT_DURATION = 0.72;
 const TIMELINE_THUMBNAIL_WIDTH = 224;
@@ -412,6 +414,12 @@ const textPositionPresets: TextPositionPreset[] = [
   { id: 'bottom-center', label: '하단 중앙', x: 50, y: 86, align: 'center' },
   { id: 'bottom-right', label: '우측 하단', x: 91, y: 86, align: 'right' }
 ];
+const previewSizeOptions: Array<{ value: PreviewSize; label: string }> = [
+  { value: 'small', label: '작게' },
+  { value: 'medium', label: '기본' },
+  { value: 'large', label: '크게' },
+  { value: 'fill', label: '맞춤' }
+];
 
 export function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -471,6 +479,7 @@ export function App() {
   const [guideStepIndex, setGuideStepIndex] = useState(0);
   const [guideTargetRect, setGuideTargetRect] = useState<GuideRect | null>(null);
   const [previewGuide, setPreviewGuide] = useState<PreviewGuideState>(null);
+  const [previewSize, setPreviewSize] = useState<PreviewSize>(() => getStoredPreviewSize());
 
   const cues = editorHistory.present.cues;
   const overlays = editorHistory.present.overlays;
@@ -666,6 +675,10 @@ export function App() {
   useEffect(() => {
     document.title = 'Edit Studio';
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem(PREVIEW_SIZE_KEY, previewSize);
+  }, [previewSize]);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -2603,7 +2616,25 @@ export function App() {
             </div>
           )}
 
-          <div className="stage-card" data-guide-target="preview">
+          <div className={`stage-card preview-size-${previewSize}`} data-guide-target="preview">
+            <div className="preview-viewbar">
+              <div>
+                <strong>미리보기</strong>
+                <span>{dimensions.width}x{dimensions.height}</span>
+              </div>
+              <div className="preview-size-controls" aria-label="미리보기 크기">
+                {previewSizeOptions.map((option) => (
+                  <button
+                    type="button"
+                    key={option.value}
+                    className={previewSize === option.value ? 'active' : ''}
+                    onClick={() => setPreviewSize(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             {videoUrl ? (
               <div className="video-stage" onClick={() => void togglePlayback()}>
                 <video
@@ -7161,4 +7192,12 @@ function isEditableTarget(target: EventTarget | null) {
     target instanceof HTMLSelectElement ||
     target.isContentEditable
   );
+}
+
+function getStoredPreviewSize(): PreviewSize {
+  if (typeof localStorage === 'undefined') return 'medium';
+  const value = localStorage.getItem(PREVIEW_SIZE_KEY);
+  return value === 'small' || value === 'medium' || value === 'large' || value === 'fill'
+    ? value
+    : 'medium';
 }

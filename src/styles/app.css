@@ -207,13 +207,82 @@ select:focus-visible {
 }
 
 .stage-card {
+  --preview-max-width: 860px;
   padding: 12px;
+}
+
+.preview-size-small {
+  --preview-max-width: 640px;
+}
+
+.preview-size-medium {
+  --preview-max-width: 860px;
+}
+
+.preview-size-large {
+  --preview-max-width: 1080px;
+}
+
+.preview-size-fill {
+  --preview-max-width: 100%;
+}
+
+.preview-viewbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.preview-viewbar > div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.preview-viewbar strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.preview-viewbar span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.preview-size-controls {
+  display: inline-flex;
+  gap: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 3px;
+}
+
+.preview-size-controls button {
+  min-height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.preview-size-controls button.active {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 1px 6px rgba(28, 35, 29, 0.12);
 }
 
 .video-stage {
   position: relative;
   overflow: hidden;
   width: 100%;
+  max-width: min(100%, var(--preview-max-width));
+  margin-inline: auto;
   aspect-ratio: 16 / 9;
   border-radius: 6px;
   background: #111412;
@@ -862,6 +931,8 @@ select:focus-visible {
   place-items: center;
   gap: 8px;
   width: 100%;
+  max-width: min(100%, var(--preview-max-width));
+  margin-inline: auto;
   aspect-ratio: 16 / 9;
   border: 1px dashed #aeb9aa;
   border-radius: 6px;
@@ -2964,6 +3035,29 @@ body {
   padding: 10px;
 }
 
+.preview-viewbar strong {
+  color: #eef3f8;
+}
+
+.preview-viewbar span {
+  color: #7f8898;
+}
+
+.preview-size-controls {
+  border-color: #28303b;
+  background: #11161d;
+}
+
+.preview-size-controls button {
+  color: #8792a4;
+}
+
+.preview-size-controls button.active {
+  background: #242c38;
+  color: #f4f8fc;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
 .video-stage {
   border-color: #1e232d;
   border-radius: 7px;
@@ -4732,6 +4826,19 @@ select:focus {
   .topbar {
     align-items: stretch;
     grid-template-columns: 1fr;
+  }
+
+  .preview-viewbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .preview-size-controls {
+    width: 100%;
+  }
+
+  .preview-size-controls button {
+    flex: 1;
   }
 
   .brand,
