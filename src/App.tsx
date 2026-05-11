@@ -154,6 +154,7 @@ import {
 
 type Selection =
   | { kind: 'clip'; id: string }
+  | { kind: 'sourceAudio'; id: string }
   | { kind: 'audio'; id: string }
   | { kind: 'cue'; id: string }
   | { kind: 'overlay'; id: string }
@@ -623,6 +624,10 @@ export function App() {
       : null;
   const selectedClip =
     selection?.kind === 'clip'
+      ? videoClips.find((clip) => clip.id === selection.id)
+      : null;
+  const selectedSourceAudioClip =
+    selection?.kind === 'sourceAudio'
       ? videoClips.find((clip) => clip.id === selection.id)
       : null;
   const selectedAudioClip =
@@ -1403,7 +1408,7 @@ export function App() {
     setPanelMode(
       nextSelection.kind === 'clip'
         ? 'video'
-        : nextSelection.kind === 'audio'
+        : nextSelection.kind === 'audio' || nextSelection.kind === 'sourceAudio'
           ? 'audio'
         : nextSelection.kind === 'cue'
         ? 'captions'
@@ -1744,6 +1749,11 @@ export function App() {
   }
 
   function duplicateSelection() {
+    if (selectedSourceAudioClip) {
+      setStatus('원본 오디오는 영상 조각과 묶여 있어 별도 복제할 수 없습니다.');
+      return;
+    }
+
     if (selectedClip) {
       if (panelMode === 'audio') {
         setStatus('원본 오디오는 영상 조각과 묶여 있어 별도 복제할 수 없습니다.');
@@ -1821,6 +1831,16 @@ export function App() {
   }
 
   function deleteSelection() {
+    if (selectedSourceAudioClip) {
+      updateVideoClip(
+        selectedSourceAudioClip.id,
+        { muted: true },
+        `video-audio:${selectedSourceAudioClip.id}:muted`
+      );
+      setStatus('선택한 원본 오디오를 음소거했습니다.');
+      return;
+    }
+
     if (selectedClip) {
       if (panelMode === 'audio') {
         updateVideoClip(selectedClip.id, { muted: true }, `video-audio:${selectedClip.id}:muted`);
@@ -1885,6 +1905,12 @@ export function App() {
   }
 
   function moveSelectionToPlayhead() {
+    if (selectedSourceAudioClip) {
+      const range = clipRanges.find((item) => item.clip.id === selectedSourceAudioClip.id);
+      if (range) seek(range.start);
+      return;
+    }
+
     if (selectedClip) {
       const range = clipRanges.find((item) => item.clip.id === selectedClip.id);
       if (range) seek(range.start);
@@ -2601,6 +2627,13 @@ export function App() {
 
     if (
       selection?.kind === 'clip' &&
+      !videoClips.some((clip) => clip.id === selection.id)
+    ) {
+      setSelection(null);
+    }
+
+    if (
+      selection?.kind === 'sourceAudio' &&
       !videoClips.some((clip) => clip.id === selection.id)
     ) {
       setSelection(null);
@@ -3335,7 +3368,7 @@ export function App() {
             onTrimClip={trimVideoClip}
             onReorderClip={reorderVideoClip}
             onSelectSourceAudio={(clipId) => {
-              setSelection({ kind: 'clip', id: clipId });
+              setSelection({ kind: 'sourceAudio', id: clipId });
               setPanelMode('audio');
             }}
             onMoveAudioClip={moveAudioClip}
@@ -3478,7 +3511,7 @@ export function App() {
               {panelMode === 'video'
                 ? '조각 삭제'
                 : panelMode === 'audio'
-                  ? selectedClip
+                  ? selectedSourceAudioClip
                     ? '음소거'
                     : '삭제'
                   : '삭제'}
@@ -3508,11 +3541,11 @@ export function App() {
               sourceFiles={audioFiles}
               videoRanges={clipRanges}
               selectedAudioClip={selectedAudioClip}
-              selectedVideoClip={selectedClip}
+              selectedVideoClip={selectedSourceAudioClip}
               onImportMusic={() => openAudioPicker('music')}
               onImportEffect={() => openAudioPicker('effect')}
               onSelectAudio={(id) => setSelection({ kind: 'audio', id })}
-              onSelectVideoAudio={(id) => setSelection({ kind: 'clip', id })}
+              onSelectVideoAudio={(id) => setSelection({ kind: 'sourceAudio', id })}
               onSeek={seek}
               onUpdateAudioClip={updateAudioClip}
               onUpdateVideoClip={updateVideoClip}
@@ -4722,6 +4755,17 @@ function Timeline({
     overlays,
     effects
   );
+  const selectedTrack: TimelineTrackKind | null = selection
+    ? selection.kind === 'clip'
+      ? 'video'
+      : selection.kind === 'audio' || selection.kind === 'sourceAudio'
+        ? 'audio'
+      : selection.kind === 'cue'
+        ? 'cue'
+      : selection.kind === 'overlay'
+        ? 'overlay'
+        : 'effect'
+    : null;
   const timelineCursorClass =
     tool === 'pan' || isSpacePanning ? 'timeline-scroll-pan-mode' : '';
 
@@ -5542,6 +5586,7 @@ function Timeline({
             label="영상"
             count={videoClips.length}
             detail="비디오 조각"
+            selected={selectedTrack === 'video'}
             resizing={resizingTrack === 'video'}
             onResizeStart={beginTrackResize}
             onResizeMove={updateTrackResize}
@@ -5553,6 +5598,7 @@ function Timeline({
             label="오디오"
             count={videoClips.length + audioClips.length}
             detail={`${Math.max(1, audioLayout.laneCount + 1)}줄 레이어`}
+            selected={selectedTrack === 'audio'}
             resizing={resizingTrack === 'audio'}
             onResizeStart={beginTrackResize}
             onResizeMove={updateTrackResize}
@@ -5564,6 +5610,7 @@ function Timeline({
             label="자막"
             count={cues.length}
             detail={`${Math.max(1, cueLayout.laneCount)}줄 레이어`}
+            selected={selectedTrack === 'cue'}
             resizing={resizingTrack === 'cue'}
             onResizeStart={beginTrackResize}
             onResizeMove={updateTrackResize}
@@ -5575,6 +5622,7 @@ function Timeline({
             label="텍스트"
             count={overlays.length}
             detail={`${Math.max(1, overlayLayout.laneCount)}줄 레이어`}
+            selected={selectedTrack === 'overlay'}
             resizing={resizingTrack === 'overlay'}
             onResizeStart={beginTrackResize}
             onResizeMove={updateTrackResize}
@@ -5586,6 +5634,7 @@ function Timeline({
             label="효과"
             count={effects.length}
             detail={`${Math.max(1, effectLayout.laneCount)}줄 레이어`}
+            selected={selectedTrack === 'effect'}
             resizing={resizingTrack === 'effect'}
             onResizeStart={beginTrackResize}
             onResizeMove={updateTrackResize}
@@ -5676,6 +5725,7 @@ function Timeline({
               track="video"
               height={videoTrackHeight}
               className="video-lane"
+              selected={selectedTrack === 'video'}
               resizing={resizingTrack === 'video'}
               onResizeStart={beginTrackResize}
               onResizeMove={updateTrackResize}
@@ -5874,6 +5924,7 @@ function Timeline({
               track="audio"
               height={audioTrackHeight}
               className="audio-lane"
+              selected={selectedTrack === 'audio'}
               resizing={resizingTrack === 'audio'}
               onResizeStart={beginTrackResize}
               onResizeMove={updateTrackResize}
@@ -5895,8 +5946,12 @@ function Timeline({
                     type="button"
                     key={`source-audio-${range.clip.id}`}
                     className={`timeline-item audio-item source-audio-item ${
-                      selection?.kind === 'clip' && selection.id === range.clip.id ? 'selected' : ''
-                    } ${isCompactTimelineItem(range.start, range.end, pxPerSecond) ? 'compact' : ''}`}
+                      selection?.kind === 'sourceAudio' && selection.id === range.clip.id
+                        ? 'selected'
+                        : ''
+                    } ${range.clip.muted ? 'is-muted' : ''} ${
+                      isCompactTimelineItem(range.start, range.end, pxPerSecond) ? 'compact' : ''
+                    }`}
                     style={timelineItemStyle(
                       range.start,
                       range.end,
@@ -5928,14 +5983,18 @@ function Timeline({
                 const label = clip.label || source?.name || '오디오';
                 const title = timelineClipTitle('오디오', label, clip.start, clip.end);
                 const waveform = audioWaveforms[clip.sourceId] ?? [];
+                const sourceKindClass =
+                  source?.kind === 'effect' ? 'is-sound-effect' : 'is-music';
 
                 return (
                   <button
                     type="button"
                     key={clip.id}
-                    className={`timeline-item audio-item external-audio-item ${
+                    className={`timeline-item audio-item external-audio-item ${sourceKindClass} ${
                       selection?.kind === 'audio' && selection.id === clip.id ? 'selected' : ''
-                    } ${isCompactTimelineItem(clip.start, clip.end, pxPerSecond) ? 'compact' : ''}`}
+                    } ${clip.muted ? 'is-muted' : ''} ${
+                      isCompactTimelineItem(clip.start, clip.end, pxPerSecond) ? 'compact' : ''
+                    }`}
                     style={timelineItemStyle(
                       clip.start,
                       clip.end,
@@ -5988,6 +6047,7 @@ function Timeline({
             <TimelineLane
               track="cue"
               height={cueTrackHeight}
+              selected={selectedTrack === 'cue'}
               resizing={resizingTrack === 'cue'}
               onResizeStart={beginTrackResize}
               onResizeMove={updateTrackResize}
@@ -6004,6 +6064,7 @@ function Timeline({
             <TimelineLane
               track="overlay"
               height={overlayTrackHeight}
+              selected={selectedTrack === 'overlay'}
               resizing={resizingTrack === 'overlay'}
               onResizeStart={beginTrackResize}
               onResizeMove={updateTrackResize}
@@ -6025,6 +6086,7 @@ function Timeline({
             <TimelineLane
               track="effect"
               height={effectTrackHeight}
+              selected={selectedTrack === 'effect'}
               resizing={resizingTrack === 'effect'}
               onResizeStart={beginTrackResize}
               onResizeMove={updateTrackResize}
@@ -6162,6 +6224,7 @@ function TimelineTrackHeader({
   label,
   count,
   detail,
+  selected,
   resizing,
   onResizeStart,
   onResizeMove,
@@ -6172,6 +6235,7 @@ function TimelineTrackHeader({
   label: string;
   count: number;
   detail?: string;
+  selected: boolean;
   resizing: boolean;
   onResizeStart: (event: ReactPointerEvent<HTMLElement>, track: TimelineTrackKind) => void;
   onResizeMove: (event: ReactPointerEvent<HTMLElement>) => void;
@@ -6179,7 +6243,12 @@ function TimelineTrackHeader({
   onResetHeight: (track: TimelineTrackKind) => void;
 }) {
   return (
-    <div className={`timeline-track-header ${resizing ? 'is-resizing' : ''}`} data-track={track}>
+    <div
+      className={`timeline-track-header ${selected ? 'is-selected' : ''} ${
+        resizing ? 'is-resizing' : ''
+      }`}
+      data-track={track}
+    >
       <span className="timeline-track-code" aria-hidden="true">
         {getTimelineTrackCode(track)}
       </span>
@@ -6224,6 +6293,7 @@ function TimelineLane({
   height,
   className,
   track,
+  selected,
   resizing,
   onResizeStart,
   onResizeMove,
@@ -6234,6 +6304,7 @@ function TimelineLane({
   height: number;
   className?: string;
   track: TimelineTrackKind;
+  selected: boolean;
   resizing: boolean;
   onResizeStart: (event: ReactPointerEvent<HTMLElement>, track: TimelineTrackKind) => void;
   onResizeMove: (event: ReactPointerEvent<HTMLElement>) => void;
@@ -6241,7 +6312,12 @@ function TimelineLane({
   onResetHeight: (track: TimelineTrackKind) => void;
 }) {
   return (
-    <div className={`timeline-lane ${className ?? ''} ${resizing ? 'is-resizing' : ''}`} style={{ height }}>
+    <div
+      className={`timeline-lane ${className ?? ''} ${selected ? 'is-selected' : ''} ${
+        resizing ? 'is-resizing' : ''
+      }`}
+      style={{ height }}
+    >
       {children}
       <button
         type="button"
@@ -6601,33 +6677,41 @@ function AudioPanel({
         {videoRanges.length === 0 && clips.length === 0 && (
           <p className="empty-copy">오디오 트랙 없음</p>
         )}
-        {videoRanges.map((range) => (
-          <button
-            type="button"
-            key={`video-audio-${range.clip.id}`}
-            className={
-              selectedVideoClip?.id === range.clip.id
-                ? 'item-card clip-card active'
-                : 'item-card clip-card'
-            }
-            onClick={() => {
-              onSelectVideoAudio(range.clip.id);
-              onSeek(range.start);
-            }}
-          >
-            <span className="clip-card-index">{range.index + 1}</span>
-            <div className="clip-card-main">
-              <strong>원본 오디오 {String(range.index + 1).padStart(2, '0')}</strong>
-              <small>
-                {formatClock(range.start)} - {formatClock(range.end)}
-              </small>
-            </div>
-            <div className="clip-card-badges">
-              <span>{Math.round(normalizeAudioVolume(range.clip.volume) * 100)}%</span>
-              {range.clip.muted && <span className="clip-badge-muted">Mute</span>}
-            </div>
-          </button>
-        ))}
+        {videoRanges.length > 0 && <div className="audio-list-section-title">원본 오디오</div>}
+        {videoRanges.map((range) => {
+          const volume = normalizeAudioVolume(range.clip.volume);
+
+          return (
+            <button
+              type="button"
+              key={`video-audio-${range.clip.id}`}
+              className={
+                selectedVideoClip?.id === range.clip.id
+                  ? 'item-card clip-card audio-card source-audio-card active'
+                  : 'item-card clip-card audio-card source-audio-card'
+              }
+              onClick={() => {
+                onSelectVideoAudio(range.clip.id);
+                onSeek(range.start);
+              }}
+            >
+              <span className="clip-card-index">{range.clip.muted ? 'M' : 'A'}</span>
+              <div className="clip-card-main">
+                <strong>원본 오디오 {String(range.index + 1).padStart(2, '0')}</strong>
+                <small>
+                  {formatClock(range.start)} - {formatClock(range.end)}
+                </small>
+              </div>
+              <div className="clip-card-badges">
+                <span>{Math.round(volume * 100)}%</span>
+                {range.clip.fadeIn ? <span>In {range.clip.fadeIn.toFixed(1)}s</span> : null}
+                {range.clip.fadeOut ? <span>Out {range.clip.fadeOut.toFixed(1)}s</span> : null}
+                {range.clip.muted && <span className="clip-badge-muted">Mute</span>}
+              </div>
+            </button>
+          );
+        })}
+        {clips.length > 0 && <div className="audio-list-section-title">추가 오디오</div>}
         {clips.map((clip, index) => {
           const source = sourceMap.get(clip.sourceId);
           const isMissing = !sourceFiles[clip.sourceId];
@@ -6638,8 +6722,8 @@ function AudioPanel({
               key={clip.id}
               className={
                 selectedAudioClip?.id === clip.id
-                  ? 'item-card clip-card audio-card active'
-                  : 'item-card clip-card audio-card'
+                  ? 'item-card clip-card audio-card external-audio-card active'
+                  : 'item-card clip-card audio-card external-audio-card'
               }
               onClick={() => {
                 onSelectAudio(clip.id);
@@ -6655,6 +6739,8 @@ function AudioPanel({
               </div>
               <div className="clip-card-badges">
                 <span>{Math.round(clip.volume * 100)}%</span>
+                {clip.fadeIn ? <span>In {clip.fadeIn.toFixed(1)}s</span> : null}
+                {clip.fadeOut ? <span>Out {clip.fadeOut.toFixed(1)}s</span> : null}
                 {clip.muted && <span className="clip-badge-muted">Mute</span>}
                 {isMissing && <span className="clip-badge-transition">파일 필요</span>}
               </div>
@@ -7780,6 +7866,13 @@ function getTimelineSelectionSummary(
     return range
       ? `영상 조각 ${range.index + 1} · ${formatClock(range.start)} - ${formatClock(range.end)}`
       : '영상 조각';
+  }
+
+  if (selection.kind === 'sourceAudio') {
+    const range = clipRanges.find((item) => item.clip.id === selection.id);
+    return range
+      ? `원본 오디오 ${range.index + 1} · ${formatClock(range.start)} - ${formatClock(range.end)}`
+      : '원본 오디오';
   }
 
   if (selection.kind === 'cue') {
