@@ -1,14 +1,16 @@
 import { buildAssScript } from './ass';
-import type {
-  CaptionCue,
-  AudioClip,
-  AudioSourceMeta,
-  ClipTransition,
-  ExportPreset,
-  InteractionEffect,
-  TextOverlay,
-  VideoClip,
-  VideoDimensions
+import {
+  primaryVideoSourceId,
+  type CaptionCue,
+  type AudioClip,
+  type AudioSourceMeta,
+  type ClipTransition,
+  type ExportPreset,
+  type ImageClip,
+  type InteractionEffect,
+  type TextOverlay,
+  type VideoClip,
+  type VideoDimensions
 } from './types';
 import {
   buildAtempoChain,
@@ -24,11 +26,15 @@ import wasmURL from '@ffmpeg/core/wasm?url';
 interface ExportOptions {
   preset: ExportPreset;
   dimensions: VideoDimensions;
+  customDimensions?: VideoDimensions;
   sourceDuration?: number;
   hasAudio?: boolean;
+  videoFiles?: Record<string, File>;
   audioSources?: AudioSourceMeta[];
   audioClips?: AudioClip[];
   audioFiles?: Record<string, File>;
+  imageClips?: ImageClip[];
+  imageFiles?: Record<string, File>;
   fontFiles?: File[];
   signal?: AbortSignal;
   onProgress?: (progress: number) => void;
@@ -69,7 +75,11 @@ export async function exportVideoWithBurnedSubtitles(
   transitions: ClipTransition[],
   options: ExportOptions
 ) {
-  const outputDimensions = getExportDimensions(options.dimensions, options.preset);
+  const outputDimensions = getExportDimensions(
+    options.dimensions,
+    options.preset,
+    options.customDimensions
+  );
   const assScript = buildAssScript(cues, overlays, outputDimensions, effects);
   const clips =
     videoClips.length > 0
@@ -96,6 +106,21 @@ export async function exportVideoWithBurnedSubtitles(
     const extension = file.name.split('.').pop()?.toLowerCase() || 'ttf';
     return `${fontDirName}/local-font-${index}.${extension}`;
   });
+  const externalVideoSourceIds = Array.from(
+    new Set(
+      clips
+        .map((clip) => clip.sourceId ?? primaryVideoSourceId)
+        .filter((sourceId) => sourceId !== primaryVideoSourceId)
+    )
+  );
+  const externalVideoInputs = externalVideoSourceIds.flatMap((sourceId) => {
+    const file = options.videoFiles?.[sourceId];
+    return file ? [{ sourceId, file }] : [];
+  });
+  const externalVideoNames = externalVideoInputs.map(({ file }, index) => {
+    const extension = file.name.split('.').pop()?.toLowerCase() || 'mp4';
+    return `video-${index}-${jobId}.${extension}`;
+  });
   const externalAudioInputs = (options.audioSources ?? []).flatMap((source) => {
     const file = options.audioFiles?.[source.id];
     return file ? [{ source, file }] : [];
@@ -103,6 +128,15 @@ export async function exportVideoWithBurnedSubtitles(
   const externalAudioNames = externalAudioInputs.map(({ file }, index) => {
     const extension = file.name.split('.').pop()?.toLowerCase() || 'm4a';
     return `audio-${index}-${jobId}.${extension}`;
+  });
+  const imageSourceIds = Array.from(new Set((options.imageClips ?? []).map((clip) => clip.sourceId)));
+  const externalImageInputs = imageSourceIds.flatMap((sourceId) => {
+    const file = options.imageFiles?.[sourceId];
+    return file ? [{ sourceId, file }] : [];
+  });
+  const externalImageNames = externalImageInputs.map(({ file }, index) => {
+    const extension = file.name.split('.').pop()?.toLowerCase() || 'png';
+    return `image-${index}-${jobId}.${extension}`;
   });
   const outputName = `captioned-output-${jobId}.mp4`;
 
@@ -122,8 +156,18 @@ export async function exportVideoWithBurnedSubtitles(
           signal: options.signal
         })
       ),
+      ...externalVideoInputs.map(async ({ file }, index) =>
+        ffmpeg.writeFile(externalVideoNames[index], await fetchFile(file), {
+          signal: options.signal
+        })
+      ),
       ...externalAudioInputs.map(async ({ file }, index) =>
         ffmpeg.writeFile(externalAudioNames[index], await fetchFile(file), {
+          signal: options.signal
+        })
+      ),
+      ...externalImageInputs.map(async ({ file }, index) =>
+        ffmpeg.writeFile(externalImageNames[index], await fetchFile(file), {
           signal: options.signal
         })
       )
@@ -140,8 +184,21 @@ export async function exportVideoWithBurnedSubtitles(
         fontDirName,
         hasAudio,
         audioClips: options.audioClips ?? [],
+        videoInputIndexes: Object.fromEntries(
+          externalVideoInputs.map(({ sourceId }, index) => [sourceId, index + 1])
+        ),
         audioInputIndexes: Object.fromEntries(
-          externalAudioInputs.map(({ source }, index) => [source.id, index + 1])
+          externalAudioInputs.map(({ source }, index) => [
+            source.id,
+            index + 1 + externalVideoNames.length
+          ])
+        ),
+        imageClips: options.imageClips ?? [],
+        imageInputIndexes: Object.fromEntries(
+          externalImageInputs.map(({ sourceId }, index) => [
+            sourceId,
+            index + 1 + externalVideoNames.length + externalAudioNames.length
+          ])
         )
       });
 
@@ -150,7 +207,9 @@ export async function exportVideoWithBurnedSubtitles(
         [
           '-i',
           inputName,
+          ...externalVideoNames.flatMap((name) => ['-i', name]),
           ...externalAudioNames.flatMap((name) => ['-i', name]),
+          ...externalImageNames.flatMap((name) => ['-loop', '1', '-i', name]),
           '-sn',
           '-filter_complex',
           filterGraph,
@@ -222,7 +281,9 @@ export async function exportVideoWithBurnedSubtitles(
       ffmpeg.deleteFile(subtitleName),
       ffmpeg.deleteFile(fontName),
       ...localFontNames.map((name) => ffmpeg.deleteFile(name)),
+      ...externalVideoNames.map((name) => ffmpeg.deleteFile(name)),
       ...externalAudioNames.map((name) => ffmpeg.deleteFile(name)),
+      ...externalImageNames.map((name) => ffmpeg.deleteFile(name)),
       ffmpeg.deleteFile(outputName)
     ]);
     await Promise.allSettled([ffmpeg.deleteDir(fontDirName)]);
@@ -236,8 +297,11 @@ export function buildVideoEditFilterGraph({
   subtitleName,
   fontDirName,
   hasAudio = true,
+  videoInputIndexes = {},
   audioClips = [],
-  audioInputIndexes = {}
+  audioInputIndexes = {},
+  imageClips = [],
+  imageInputIndexes = {}
 }: {
   clips: VideoClip[];
   transitions: ClipTransition[];
@@ -245,21 +309,45 @@ export function buildVideoEditFilterGraph({
   subtitleName: string;
   fontDirName?: string;
   hasAudio?: boolean;
+  videoInputIndexes?: Record<string, number>;
   audioClips?: AudioClip[];
   audioInputIndexes?: Record<string, number>;
+  imageClips?: ImageClip[];
+  imageInputIndexes?: Record<string, number>;
 }) {
   const normalizedTransitions = normalizeTransitionsForClips(clips, transitions);
   const parts: string[] = [];
 
   clips.forEach((clip, index) => {
     const speed = Math.max(0.25, Math.min(clip.speed, 4));
+    const inputIndex = videoInputIndexes[clip.sourceId ?? primaryVideoSourceId] ?? 0;
     const outputDuration = getClipOutputDuration(clip);
+    const crop = normalizeCrop(clip.crop);
+    const cropWidth = formatFilterNumber(Math.max(0.1, 1 - (crop.left + crop.right) / 100));
+    const cropHeight = formatFilterNumber(Math.max(0.1, 1 - (crop.top + crop.bottom) / 100));
+    const cropX = formatFilterNumber(crop.left / 100);
+    const cropY = formatFilterNumber(crop.top / 100);
+    const transformScale = formatFilterNumber(clampNumber(clip.scale, 0.1, 8));
+    const rotation = formatFilterNumber((clampNumber(clip.rotation, -180, 180) * Math.PI) / 180);
+    const opacity = formatFilterNumber(clampNumber(clip.opacity, 0, 1));
+    const overlayX = formatFilterNumber(clampNumber(clip.x, 0, 100) / 100);
+    const overlayY = formatFilterNumber(clampNumber(clip.y, 0, 100) / 100);
     parts.push(
-      `[0:v]trim=start=${formatFilterNumber(clip.sourceStart)}:end=${formatFilterNumber(
+      `[${inputIndex}:v]trim=start=${formatFilterNumber(clip.sourceStart)}:end=${formatFilterNumber(
         clip.sourceEnd
-      )},setpts=(PTS-STARTPTS)/${formatFilterNumber(speed)},scale=${
+      )},setpts=(PTS-STARTPTS)/${formatFilterNumber(
+        speed
+      )},crop=w=iw*${cropWidth}:h=ih*${cropHeight}:x=iw*${cropX}:y=ih*${cropY},scale=${
         outputDimensions.width
-      }:${outputDimensions.height}:flags=lanczos,setsar=1,format=yuv420p[v${index}]`
+      }*${transformScale}:-2:flags=lanczos,rotate=${rotation}:ow=rotw(${rotation}):oh=roth(${rotation}):c=black@0,format=rgba,colorchannelmixer=aa=${opacity}[vf${index}]`
+    );
+    parts.push(
+      `color=c=black:s=${outputDimensions.width}x${outputDimensions.height}:d=${formatFilterNumber(
+        outputDuration
+      )},format=rgba[bg${index}]`
+    );
+    parts.push(
+      `[bg${index}][vf${index}]overlay=x=(W-w)*${overlayX}:y=(H-h)*${overlayY}:shortest=1,format=yuv420p[v${index}]`
     );
 
     const volume = formatFilterNumber(clampAudioVolume(clip.volume));
@@ -287,7 +375,7 @@ export function buildVideoEditFilterGraph({
       );
     } else {
       parts.push(
-        `[0:a]atrim=start=${formatFilterNumber(clip.sourceStart)}:end=${formatFilterNumber(
+        `[${inputIndex}:a]atrim=start=${formatFilterNumber(clip.sourceStart)}:end=${formatFilterNumber(
           clip.sourceEnd
         )},asetpts=PTS-STARTPTS,${buildAtempoChain(speed).join(
           ','
@@ -339,6 +427,29 @@ export function buildVideoEditFilterGraph({
     currentVideoLabel = outputVideoLabel;
     currentAudioLabel = outputAudioLabel;
   }
+
+  imageClips.forEach((clip, index) => {
+    const inputIndex = imageInputIndexes[clip.sourceId];
+    if (!inputIndex) return;
+
+    const imageLabel = `im${index}`;
+    const outputLabel = `iv${index}`;
+    const scale = formatFilterNumber(clampNumber(clip.scale, 0.05, 8));
+    const rotation = formatFilterNumber((clampNumber(clip.rotation, -180, 180) * Math.PI) / 180);
+    const opacity = formatFilterNumber(clampNumber(clip.opacity, 0, 1));
+    const overlayX = formatFilterNumber(clampNumber(clip.x, 0, 100) / 100);
+    const overlayY = formatFilterNumber(clampNumber(clip.y, 0, 100) / 100);
+
+    parts.push(
+      `[${inputIndex}:v]scale=iw*${scale}:-2:flags=lanczos,rotate=${rotation}:ow=rotw(${rotation}):oh=roth(${rotation}):c=black@0,format=rgba,colorchannelmixer=aa=${opacity}[${imageLabel}]`
+    );
+    parts.push(
+      `[${currentVideoLabel}][${imageLabel}]overlay=x=(W-w)*${overlayX}:y=(H-h)*${overlayY}:enable='between(t,${formatFilterNumber(
+        clip.start
+      )},${formatFilterNumber(clip.end)})':shortest=0[${outputLabel}]`
+    );
+    currentVideoLabel = outputLabel;
+  });
 
   parts.push(
     `[${currentVideoLabel}]subtitles=${subtitleName}:fontsdir=${
@@ -402,8 +513,20 @@ function clampAudioFade(value: number | undefined, duration: number) {
 
 export function getExportDimensions(
   dimensions: VideoDimensions,
-  preset: ExportPreset
+  preset: ExportPreset,
+  customDimensions?: VideoDimensions
 ): VideoDimensions {
+  if (preset === 'shorts1080') {
+    return { width: 1080, height: 1920 };
+  }
+
+  if (preset === 'custom' && customDimensions) {
+    return {
+      width: ensureEven(customDimensions.width),
+      height: ensureEven(customDimensions.height)
+    };
+  }
+
   if (preset === 'source' || dimensions.height <= 720) {
     return {
       width: ensureEven(dimensions.width),
@@ -411,12 +534,33 @@ export function getExportDimensions(
     };
   }
 
-  const ratio = 720 / dimensions.height;
+  const targetHeight = preset === 'hd1080' ? 1080 : 720;
+  if (preset === 'hd1080' && dimensions.height <= 1080) {
+    return {
+      width: ensureEven(dimensions.width),
+      height: ensureEven(dimensions.height)
+    };
+  }
+
+  const ratio = targetHeight / dimensions.height;
 
   return {
     width: ensureEven(dimensions.width * ratio),
-    height: 720
+    height: targetHeight
   };
+}
+
+function normalizeCrop(crop: VideoClip['crop'] | undefined) {
+  return {
+    left: clampNumber(crop?.left ?? 0, 0, 90),
+    right: clampNumber(crop?.right ?? 0, 0, 90),
+    top: clampNumber(crop?.top ?? 0, 0, 90),
+    bottom: clampNumber(crop?.bottom ?? 0, 0, 90)
+  };
+}
+
+function clampNumber(value: number | undefined, min: number, max: number) {
+  return Math.max(min, Math.min(value ?? min, max));
 }
 
 async function loadFfmpeg(options: ExportOptions) {
@@ -514,7 +658,8 @@ function needsScale(source: VideoDimensions, output: VideoDimensions) {
 }
 
 function ensureEven(value: number) {
-  return Math.max(2, Math.round(value / 2) * 2);
+  const finiteValue = Number.isFinite(value) ? value : 2;
+  return Math.max(2, Math.min(7680, Math.round(finiteValue / 2) * 2));
 }
 
 function classifyFfmpegError(error: unknown): ExportFailureKind {

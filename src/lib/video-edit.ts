@@ -1,4 +1,10 @@
-import type { ClipTransition, ClipTransitionKind, VideoClip } from './types';
+import {
+  defaultVideoTransform,
+  primaryVideoSourceId,
+  type ClipTransition,
+  type ClipTransitionKind,
+  type VideoClip
+} from './types';
 import { clamp, MIN_CUE_DURATION } from './time';
 import { normalizeVideoClipAudio } from './audio-edit';
 
@@ -15,16 +21,22 @@ export interface ClipTimelineRange {
   transitionOut: number;
 }
 
-export function createDefaultVideoClip(sourceDuration: number): VideoClip {
+export function createDefaultVideoClip(
+  sourceDuration: number,
+  sourceId = primaryVideoSourceId
+): VideoClip {
   return {
     id: crypto.randomUUID(),
+    sourceId,
     sourceStart: 0,
     sourceEnd: Math.max(sourceDuration, MIN_CLIP_SOURCE_DURATION),
     speed: DEFAULT_CLIP_SPEED,
     muted: false,
     volume: 1,
     fadeIn: 0,
-    fadeOut: 0
+    fadeOut: 0,
+    ...defaultVideoTransform,
+    crop: { ...defaultVideoTransform.crop }
   };
 }
 
@@ -53,11 +65,27 @@ export function normalizeVideoClip(clip: VideoClip, sourceDuration?: number): Vi
 
   return normalizeVideoClipAudio({
     ...clip,
+    sourceId: clip.sourceId || primaryVideoSourceId,
     sourceStart,
     sourceEnd,
     speed: normalizeSpeed(clip.speed),
-    muted: Boolean(clip.muted)
+    muted: Boolean(clip.muted),
+    x: clamp(finiteOr(clip.x, defaultVideoTransform.x), 0, 100),
+    y: clamp(finiteOr(clip.y, defaultVideoTransform.y), 0, 100),
+    scale: clamp(finiteOr(clip.scale, defaultVideoTransform.scale), 0.1, 8),
+    rotation: clamp(finiteOr(clip.rotation, defaultVideoTransform.rotation), -180, 180),
+    opacity: clamp(finiteOr(clip.opacity, defaultVideoTransform.opacity), 0, 1),
+    crop: {
+      left: clamp(finiteOr(clip.crop?.left, 0), 0, 90),
+      right: clamp(finiteOr(clip.crop?.right, 0), 0, 90),
+      top: clamp(finiteOr(clip.crop?.top, 0), 0, 90),
+      bottom: clamp(finiteOr(clip.crop?.bottom, 0), 0, 90)
+    }
   });
+}
+
+function finiteOr(value: number | undefined, fallback: number) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
 export function getTransitionBetween(

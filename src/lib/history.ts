@@ -1,4 +1,8 @@
-import type { EditorSnapshot } from './types';
+import { defaultCanvasSettings, defaultVideoTransform, type EditorSnapshot } from './types';
+
+type EditorSnapshotInput =
+  Omit<EditorSnapshot, 'mediaSources' | 'imageClips' | 'keyframes' | 'canvasSettings'> &
+  Partial<Pick<EditorSnapshot, 'mediaSources' | 'imageClips' | 'keyframes' | 'canvasSettings'>>;
 
 export interface EditorHistory {
   past: EditorSnapshot[];
@@ -8,7 +12,7 @@ export interface EditorHistory {
 
 export const HISTORY_LIMIT = 80;
 
-export function createEditorHistory(snapshot: EditorSnapshot): EditorHistory {
+export function createEditorHistory(snapshot: EditorSnapshotInput): EditorHistory {
   return {
     past: [],
     present: cloneSnapshot(snapshot),
@@ -18,7 +22,7 @@ export function createEditorHistory(snapshot: EditorSnapshot): EditorHistory {
 
 export function commitEditorHistory(
   history: EditorHistory,
-  nextSnapshot: EditorSnapshot,
+  nextSnapshot: EditorSnapshotInput,
   options: { merge?: boolean; limit?: number } = {}
 ): EditorHistory {
   const next = cloneSnapshot(nextSnapshot);
@@ -62,18 +66,25 @@ export function redoEditorHistory(history: EditorHistory): EditorHistory {
   };
 }
 
-export function cloneSnapshot(snapshot: EditorSnapshot): EditorSnapshot {
+export function cloneSnapshot(snapshot: EditorSnapshotInput): EditorSnapshot {
   return {
+    mediaSources: (snapshot.mediaSources ?? []).map((source) => ({ ...source })),
     cues: snapshot.cues.map((cue) => ({
       ...cue,
       style: { ...cue.style }
     })),
     overlays: snapshot.overlays.map((overlay) => ({ ...overlay })),
     effects: snapshot.effects.map((effect) => ({ ...effect })),
-    videoClips: snapshot.videoClips.map((clip) => ({ ...clip })),
+    videoClips: snapshot.videoClips.map((clip) => ({
+      ...clip,
+      crop: { ...(clip.crop ?? defaultVideoTransform.crop) }
+    })),
+    imageClips: (snapshot.imageClips ?? []).map((clip) => ({ ...clip })),
     transitions: snapshot.transitions.map((transition) => ({ ...transition })),
     audioSources: snapshot.audioSources.map((source) => ({ ...source })),
-    audioClips: snapshot.audioClips.map((clip) => ({ ...clip }))
+    audioClips: snapshot.audioClips.map((clip) => ({ ...clip })),
+    keyframes: (snapshot.keyframes ?? []).map((keyframe) => ({ ...keyframe })),
+    canvasSettings: { ...(snapshot.canvasSettings ?? defaultCanvasSettings) }
   };
 }
 

@@ -8,6 +8,7 @@ import {
 import { getCueDiagnostics } from '../src/lib/diagnostics';
 import { createExportPreflightResult } from '../src/lib/export-preflight';
 import { inferFontVariantFromName } from '../src/lib/fonts';
+import { createKeyframe, getKeyframedValue } from '../src/lib/keyframes';
 import { buildVideoEditFilterGraph, getExportDimensions } from '../src/lib/ffmpeg';
 import {
   commitEditorHistory,
@@ -310,13 +311,33 @@ describe('project file normalization', () => {
     expect(project.effects[0].x).toBe(0);
     expect(project.effects[0].y).toBe(100);
     expect(project.effects[0].size).toBe(260);
+    expect(project.mediaSources?.[0]).toMatchObject({
+      id: 'primary-video-source',
+      kind: 'video',
+      name: 'source.mp4'
+    });
     expect(project.videoClips?.[0].speed).toBe(4);
     expect(project.videoClips?.[0].muted).toBe(true);
+    expect(project.videoClips?.[0].sourceId).toBe('primary-video-source');
+    expect(project.videoClips?.[0].scale).toBe(1);
     expect(project.transitions?.[0].kind).toBe('fade');
     expect(project.transitions?.[0].duration).toBeLessThanOrEqual(0.5);
     expect(project.audioSources?.[0].kind).toBe('music');
     expect(project.audioClips?.[0].volume).toBe(2);
     expect(project.audioClips?.[0].fadeIn).toBe(2);
+  });
+});
+
+describe('keyframe interpolation', () => {
+  it('interpolates values between keyframes with easing', () => {
+    const keyframes = [
+      createKeyframe('video', 'clip-a', 'x', 0, 20, 'linear'),
+      createKeyframe('video', 'clip-a', 'x', 10, 80, 'ease-in-out')
+    ];
+
+    expect(getKeyframedValue(keyframes, 'video', 'clip-a', 'x', -1, 50)).toBe(20);
+    expect(getKeyframedValue(keyframes, 'video', 'clip-a', 'x', 10, 50)).toBe(80);
+    expect(getKeyframedValue(keyframes, 'video', 'clip-a', 'x', 5, 50)).toBeCloseTo(50, 4);
   });
 });
 
@@ -353,6 +374,22 @@ describe('export sizing', () => {
     expect(getExportDimensions({ width: 1920, height: 1080 }, 'fast720')).toEqual({
       width: 1280,
       height: 720
+    });
+  });
+
+  it('supports shorts and sanitized custom export dimensions', () => {
+    expect(getExportDimensions({ width: 1920, height: 1080 }, 'shorts1080')).toEqual({
+      width: 1080,
+      height: 1920
+    });
+    expect(
+      getExportDimensions({ width: 1920, height: 1080 }, 'custom', {
+        width: 1001,
+        height: Number.NaN
+      })
+    ).toEqual({
+      width: 1002,
+      height: 2
     });
   });
 });
@@ -506,6 +543,41 @@ describe('video clip editing', () => {
     expect(graph).toContain('xfade=transition=slideleft');
     expect(graph).toContain('acrossfade=d=0.5');
     expect(graph).toContain('subtitles=captions.ass:fontsdir=fonts-test');
+  });
+
+  it('adds multi-source video inputs and timed image overlays to the export graph', () => {
+    const graph = buildVideoEditFilterGraph({
+      clips: [
+        clips[0],
+        {
+          ...clips[1],
+          sourceId: 'second-video'
+        }
+      ],
+      transitions: [],
+      outputDimensions: { width: 1280, height: 720 },
+      subtitleName: 'captions.ass',
+      videoInputIndexes: { 'second-video': 1 },
+      imageInputIndexes: { logo: 2 },
+      imageClips: [
+        {
+          id: 'image-1',
+          sourceId: 'logo',
+          start: 1,
+          end: 3,
+          x: 75,
+          y: 15,
+          scale: 0.5,
+          rotation: 0,
+          opacity: 0.8
+        }
+      ]
+    });
+
+    expect(graph).toContain('[1:v]trim=start=4:end=10');
+    expect(graph).toContain('[2:v]scale=iw*0.5');
+    expect(graph).toContain("enable='between(t,1,3)'");
+    expect(graph).toContain('colorchannelmixer=aa=0.8');
   });
 
   it('uses a silent audio fallback when the source has no audio stream', () => {

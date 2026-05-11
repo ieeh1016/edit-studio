@@ -1,23 +1,36 @@
 import {
   defaultCaptionStyle,
+  defaultCanvasSettings,
   defaultInteractionEffect,
   defaultTextOverlay,
+  defaultVideoTransform,
   builtinPreviewFontFamily,
   type AudioClip,
   type AudioSourceKind,
   type AudioSourceMeta,
+  type CanvasAspectPreset,
+  type CanvasSettings,
   type CaptionCue,
   type ClipTransition,
   type ClipTransitionKind,
   type CaptionPosition,
   type CaptionStyle,
+  type CropSettings,
   type InteractionEffect,
   type InteractionEffectKind,
+  type ImageClip,
+  type Keyframe,
+  type KeyframeEasing,
+  type KeyframeProperty,
+  type KeyframeTargetKind,
+  type MediaSourceKind,
+  type MediaSourceMeta,
   type ProjectMediaMeta,
   type ProjectFile,
   type TextAlign,
   type TextOverlay,
-  type VideoClip
+  type VideoClip,
+  primaryVideoSourceId
 } from './types';
 import { clamp, coerceCueBounds } from './time';
 import { sortCues } from './subtitle';
@@ -33,6 +46,26 @@ import {
 } from './video-edit';
 
 const audioSourceKinds = new Set<AudioSourceKind>(['music', 'effect']);
+const mediaSourceKinds = new Set<MediaSourceKind>(['video', 'image', 'audio']);
+const canvasPresets = new Set<CanvasAspectPreset>(['source', '16:9', '9:16', '1:1', 'custom']);
+const keyframeTargets = new Set<KeyframeTargetKind>(['video', 'overlay', 'effect', 'audio']);
+const keyframeProperties = new Set<KeyframeProperty>([
+  'x',
+  'y',
+  'scale',
+  'scaleX',
+  'scaleY',
+  'rotation',
+  'opacity',
+  'size',
+  'volume'
+]);
+const keyframeEasings = new Set<KeyframeEasing>([
+  'linear',
+  'ease-in',
+  'ease-out',
+  'ease-in-out'
+]);
 const positions = new Set<CaptionPosition>(['bottom', 'middle', 'top']);
 const alignments = new Set<TextAlign>(['left', 'center', 'right']);
 const transitionKinds = new Set<ClipTransitionKind>([
@@ -65,8 +98,17 @@ export function normalizeProjectFile(input: unknown): ProjectFile {
   const effects = Array.isArray(input.effects)
     ? (input.effects.map(normalizeEffect).filter(Boolean) as InteractionEffect[])
     : [];
+  const mediaSources = normalizeMediaSources(input);
+  const primarySourceId = mediaSources.find((source) => source.kind === 'video')?.id ?? primaryVideoSourceId;
   const videoClips = Array.isArray(input.videoClips)
-    ? (input.videoClips.map(normalizeVideoClipInput).filter(Boolean) as VideoClip[])
+    ? (input.videoClips
+        .map((clip) => normalizeVideoClipInput(clip, primarySourceId))
+        .filter(Boolean) as VideoClip[])
+    : [];
+  const imageClips = Array.isArray(input.imageClips)
+    ? (input.imageClips
+        .map((clip) => normalizeImageClipInput(clip, mediaSources))
+        .filter(Boolean) as ImageClip[])
     : [];
   const transitions = Array.isArray(input.transitions)
     ? normalizeTransitionsForClips(
@@ -83,6 +125,9 @@ export function normalizeProjectFile(input: unknown): ProjectFile {
         .map((clip) => normalizeAudioClipInput(clip, audioSourceMap))
         .filter(Boolean) as AudioClip[])
     : [];
+  const keyframes = Array.isArray(input.keyframes)
+    ? (input.keyframes.map(normalizeKeyframe).filter(Boolean) as Keyframe[])
+    : [];
   const createdAt = stringOr(input.createdAt, new Date().toISOString());
   const updatedAt = stringOr(input.updatedAt, createdAt);
 
@@ -90,15 +135,65 @@ export function normalizeProjectFile(input: unknown): ProjectFile {
     version: 1,
     videoName: typeof input.videoName === 'string' ? input.videoName : undefined,
     mediaMeta: normalizeMediaMeta(input.mediaMeta),
+    mediaSources,
     cues,
     overlays,
     effects,
     videoClips,
+    imageClips,
     transitions,
     audioSources,
     audioClips,
+    keyframes,
+    canvasSettings: normalizeCanvasSettings(input.canvasSettings),
     createdAt,
     updatedAt
+  };
+}
+
+function normalizeMediaSources(input: Record<string, unknown>): MediaSourceMeta[] {
+  const sources = Array.isArray(input.mediaSources)
+    ? (input.mediaSources.map(normalizeMediaSource).filter(Boolean) as MediaSourceMeta[])
+    : [];
+
+  if (sources.length > 0) return sources;
+
+  const mediaMeta = normalizeMediaMeta(input.mediaMeta);
+  const fallbackName = typeof input.videoName === 'string' ? input.videoName : undefined;
+  if (!mediaMeta && !fallbackName) return [];
+
+  return [
+    {
+      id: primaryVideoSourceId,
+      kind: 'video',
+      name: mediaMeta?.name ?? fallbackName ?? 'source.mp4',
+      size: mediaMeta?.size ?? 0,
+      lastModified: mediaMeta?.lastModified ?? 0,
+      ...(mediaMeta?.duration !== undefined ? { duration: mediaMeta.duration } : {}),
+      ...(mediaMeta?.width !== undefined ? { width: mediaMeta.width } : {}),
+      ...(mediaMeta?.height !== undefined ? { height: mediaMeta.height } : {})
+    }
+  ];
+}
+
+function normalizeMediaSource(input: unknown): MediaSourceMeta | null {
+  if (!isRecord(input) || typeof input.name !== 'string') return null;
+  const kind = mediaSourceKinds.has(input.kind as MediaSourceKind)
+    ? (input.kind as MediaSourceKind)
+    : 'video';
+  const duration = optionalFiniteNumber(input.duration);
+  const width = optionalFiniteNumber(input.width);
+  const height = optionalFiniteNumber(input.height);
+
+  return {
+    id: stringOr(input.id, crypto.randomUUID()),
+    kind,
+    name: input.name,
+    size: Math.max(0, finiteNumber(input.size, 0)),
+    lastModified: Math.max(0, finiteNumber(input.lastModified, 0)),
+    ...(duration !== undefined ? { duration: Math.max(0, duration) } : {}),
+    ...(width !== undefined ? { width: Math.max(0, Math.round(width)) } : {}),
+    ...(height !== undefined ? { height: Math.max(0, Math.round(height)) } : {})
   };
 }
 
@@ -174,7 +269,8 @@ function normalizeOverlay(input: unknown): TextOverlay | null {
       0,
       24
     ),
-    shadow: booleanOr(input.shadow, defaultTextOverlay.shadow)
+    shadow: booleanOr(input.shadow, defaultTextOverlay.shadow),
+    opacity: clamp(finiteNumber(input.opacity, defaultTextOverlay.opacity ?? 1), 0, 1)
   };
 }
 
@@ -201,7 +297,7 @@ function normalizeEffect(input: unknown): InteractionEffect | null {
   };
 }
 
-function normalizeVideoClipInput(input: unknown): VideoClip | null {
+function normalizeVideoClipInput(input: unknown, fallbackSourceId: string): VideoClip | null {
   if (!isRecord(input)) return null;
 
   const sourceStart = clamp(finiteNumber(input.sourceStart, 0), 0, Number.MAX_SAFE_INTEGER);
@@ -209,16 +305,95 @@ function normalizeVideoClipInput(input: unknown): VideoClip | null {
     sourceStart + 0.2,
     finiteNumber(input.sourceEnd, sourceStart + 3)
   );
+  const crop = normalizeCrop(input.crop);
 
   return {
     id: stringOr(input.id, crypto.randomUUID()),
+    sourceId: stringOr(input.sourceId, fallbackSourceId),
     sourceStart,
     sourceEnd,
     speed: normalizeSpeed(finiteNumber(input.speed, 1)),
     muted: booleanOr(input.muted, false),
     volume: normalizeAudioVolume(optionalFiniteNumber(input.volume)),
     fadeIn: normalizeAudioFade(optionalFiniteNumber(input.fadeIn), sourceEnd - sourceStart),
-    fadeOut: normalizeAudioFade(optionalFiniteNumber(input.fadeOut), sourceEnd - sourceStart)
+    fadeOut: normalizeAudioFade(optionalFiniteNumber(input.fadeOut), sourceEnd - sourceStart),
+    x: clamp(finiteNumber(input.x, defaultVideoTransform.x), 0, 100),
+    y: clamp(finiteNumber(input.y, defaultVideoTransform.y), 0, 100),
+    scale: clamp(finiteNumber(input.scale, defaultVideoTransform.scale), 0.1, 8),
+    rotation: clamp(finiteNumber(input.rotation, defaultVideoTransform.rotation), -180, 180),
+    opacity: clamp(finiteNumber(input.opacity, defaultVideoTransform.opacity), 0, 1),
+    crop
+  };
+}
+
+function normalizeCrop(input: unknown): CropSettings {
+  const source = isRecord(input) ? input : {};
+  return {
+    left: clamp(finiteNumber(source.left, defaultVideoTransform.crop.left), 0, 90),
+    right: clamp(finiteNumber(source.right, defaultVideoTransform.crop.right), 0, 90),
+    top: clamp(finiteNumber(source.top, defaultVideoTransform.crop.top), 0, 90),
+    bottom: clamp(finiteNumber(source.bottom, defaultVideoTransform.crop.bottom), 0, 90)
+  };
+}
+
+function normalizeImageClipInput(
+  input: unknown,
+  mediaSources: MediaSourceMeta[]
+): ImageClip | null {
+  if (!isRecord(input) || typeof input.sourceId !== 'string') return null;
+  const source = mediaSources.find((item) => item.id === input.sourceId && item.kind === 'image');
+  if (!source) return null;
+  const start = finiteNumber(input.start, 0);
+  const end = finiteNumber(input.end, start + 3);
+  const bounds = coerceCueBounds(start, end);
+
+  return {
+    id: stringOr(input.id, crypto.randomUUID()),
+    sourceId: source.id,
+    start: bounds.start,
+    end: bounds.end,
+    x: clamp(finiteNumber(input.x, 50), 0, 100),
+    y: clamp(finiteNumber(input.y, 50), 0, 100),
+    scale: clamp(finiteNumber(input.scale, 1), 0.05, 8),
+    rotation: clamp(finiteNumber(input.rotation, 0), -180, 180),
+    opacity: clamp(finiteNumber(input.opacity, 1), 0, 1)
+  };
+}
+
+function normalizeKeyframe(input: unknown): Keyframe | null {
+  if (!isRecord(input)) return null;
+  if (typeof input.targetId !== 'string') return null;
+  const targetKind = keyframeTargets.has(input.targetKind as KeyframeTargetKind)
+    ? (input.targetKind as KeyframeTargetKind)
+    : 'video';
+  const property = keyframeProperties.has(input.property as KeyframeProperty)
+    ? (input.property as KeyframeProperty)
+    : 'x';
+  const easing = keyframeEasings.has(input.easing as KeyframeEasing)
+    ? (input.easing as KeyframeEasing)
+    : 'linear';
+
+  return {
+    id: stringOr(input.id, crypto.randomUUID()),
+    targetId: input.targetId,
+    targetKind,
+    property,
+    time: Math.max(0, finiteNumber(input.time, 0)),
+    value: finiteNumber(input.value, 0),
+    easing
+  };
+}
+
+function normalizeCanvasSettings(input: unknown): CanvasSettings {
+  if (!isRecord(input)) return defaultCanvasSettings;
+  const preset = canvasPresets.has(input.preset as CanvasAspectPreset)
+    ? (input.preset as CanvasAspectPreset)
+    : defaultCanvasSettings.preset;
+
+  return {
+    preset,
+    width: clamp(Math.round(finiteNumber(input.width, defaultCanvasSettings.width)), 120, 7680),
+    height: clamp(Math.round(finiteNumber(input.height, defaultCanvasSettings.height)), 120, 7680)
   };
 }
 

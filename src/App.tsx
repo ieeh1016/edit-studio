@@ -76,6 +76,7 @@ import {
   type AppFontAsset
 } from './lib/fonts';
 import { normalizeProjectFile } from './lib/project';
+import { createKeyframe, getKeyframedValue } from './lib/keyframes';
 import {
   createAudioClip,
   createAudioSourceMeta,
@@ -97,6 +98,7 @@ import {
   getTransitionPreviewAtTime,
   insertDuplicateClipAfter,
   reorderClipRipple,
+  normalizeVideoClip,
   normalizeSpeed,
   normalizeTransitionsForClips,
   removeTimelineRange,
@@ -106,10 +108,13 @@ import {
 } from './lib/video-edit';
 import {
   defaultCaptionStyle,
+  defaultCanvasSettings,
   defaultInteractionEffect,
   defaultTextOverlay,
+  defaultVideoTransform,
   interactionEffectPresets,
   builtinPreviewFontFamily,
+  primaryVideoSourceId,
   type AudioClip,
   type AudioSourceKind,
   type AudioSourceMeta,
@@ -120,8 +125,13 @@ import {
   type ClipTransitionKind,
   type EditorSnapshot,
   type ExportPreset,
+  type ImageClip,
   type InteractionEffect,
   type InteractionEffectKind,
+  type Keyframe,
+  type KeyframeProperty,
+  type MediaSourceKind,
+  type MediaSourceMeta,
   type ProjectMediaMeta,
   type ProjectFile,
   type TextAlign,
@@ -154,6 +164,7 @@ import {
 
 type Selection =
   | { kind: 'clip'; id: string }
+  | { kind: 'image'; id: string }
   | { kind: 'sourceAudio'; id: string }
   | { kind: 'audio'; id: string }
   | { kind: 'cue'; id: string }
@@ -161,16 +172,18 @@ type Selection =
   | { kind: 'effect'; id: string }
   | null;
 
-type PanelMode = 'video' | 'audio' | 'captions' | 'texts' | 'effects';
+type PanelMode = 'media' | 'video' | 'audio' | 'captions' | 'texts' | 'effects';
 type CutRange = { start: number | null; end: number | null };
 type TimelineTool = 'select' | 'pan';
-type TimelineItemKind = 'audio' | 'cue' | 'overlay' | 'effect';
-type TimelineTrackKind = 'video' | 'audio' | 'cue' | 'overlay' | 'effect';
+type TimelineItemKind = 'audio' | 'image' | 'cue' | 'overlay' | 'effect';
+type TimelineTrackKind = 'video' | 'image' | 'audio' | 'cue' | 'overlay' | 'effect';
 type TimelineTrackHeights = Record<TimelineTrackKind, number>;
 type TimelineThumbnail = { time: number; url: string };
 type AudioWaveform = number[];
 type AudioFileMap = Record<string, File>;
 type AudioUrlMap = Record<string, string>;
+type MediaFileMap = Record<string, File>;
+type MediaUrlMap = Record<string, string>;
 type TimelineThumbnailRequest = TimelineThumbnailWindow;
 type PreviewGuideState = {
   vertical?: number;
@@ -257,6 +270,21 @@ type ExportPhase =
   | 'cancelled';
 
 const defaultDimensions: VideoDimensions = { width: 1920, height: 1080 };
+function createEmptyEditorSnapshot(): EditorSnapshot {
+  return {
+    mediaSources: [],
+    cues: [],
+    overlays: [],
+    effects: [],
+    videoClips: [],
+    imageClips: [],
+    transitions: [],
+    audioSources: [],
+    audioClips: [],
+    keyframes: [],
+    canvasSettings: { ...defaultCanvasSettings }
+  };
+}
 const AUTOSAVE_KEY = 'local-caption-studio:auto-save:v1';
 const AUTOSAVE_VIDEO_DB_NAME = 'edit-studio:auto-save-video:v1';
 const AUTOSAVE_VIDEO_STORE_NAME = 'media';
@@ -449,6 +477,7 @@ export function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const transitionVideoRef = useRef<HTMLVideoElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
+  const mediaInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const subtitleInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
@@ -461,6 +490,7 @@ export function App() {
   const audioImportKindRef = useRef<AudioSourceKind>('music');
   const audioPreviewRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const audioUrlsRef = useRef<AudioUrlMap>({});
+  const mediaUrlsRef = useRef<MediaUrlMap>({});
   const videoCacheVersionRef = useRef(0);
   const thumbnailCacheRef = useRef<Map<number, TimelineThumbnail>>(new Map());
   const thumbnailVideoUrlRef = useRef<string | null>(null);
@@ -472,15 +502,7 @@ export function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [editorHistory, setEditorHistory] = useState(() =>
-    createEditorHistory({
-      cues: [],
-      overlays: [],
-      effects: [],
-      videoClips: [],
-      transitions: [],
-      audioSources: [],
-      audioClips: []
-    })
+    createEditorHistory(createEmptyEditorSnapshot())
   );
   const [selection, setSelection] = useState<Selection>(null);
   const [panelMode, setPanelMode] = useState<PanelMode>('video');
@@ -505,6 +527,12 @@ export function App() {
   const [audioFiles, setAudioFiles] = useState<AudioFileMap>({});
   const [audioUrls, setAudioUrls] = useState<AudioUrlMap>({});
   const [audioWaveforms, setAudioWaveforms] = useState<Record<string, AudioWaveform>>({});
+  const [mediaFiles, setMediaFiles] = useState<MediaFileMap>({});
+  const [mediaUrls, setMediaUrls] = useState<MediaUrlMap>({});
+  const [customExportDimensions, setCustomExportDimensions] = useState<VideoDimensions>({
+    width: 1920,
+    height: 1080
+  });
   const [thumbnailRequest, setThumbnailRequest] = useState<TimelineThumbnailRequest | null>(null);
   const [pendingResetAction, setPendingResetAction] = useState<PendingResetAction | null>(null);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
@@ -515,12 +543,16 @@ export function App() {
   const [previewSize, setPreviewSize] = useState<PreviewSize>(() => getStoredPreviewSize());
 
   const cues = editorHistory.present.cues;
+  const mediaSources = editorHistory.present.mediaSources;
   const overlays = editorHistory.present.overlays;
   const effects = editorHistory.present.effects;
   const videoClips = editorHistory.present.videoClips;
+  const imageClips = editorHistory.present.imageClips;
   const transitions = editorHistory.present.transitions;
   const audioSources = editorHistory.present.audioSources;
   const audioClips = editorHistory.present.audioClips;
+  const keyframes = editorHistory.present.keyframes;
+  const canvasSettings = editorHistory.present.canvasSettings;
   const canUndo = editorHistory.past.length > 0;
   const canRedo = editorHistory.future.length > 0;
 
@@ -533,6 +565,10 @@ export function App() {
   useEffect(() => {
     audioUrlsRef.current = audioUrls;
   }, [audioUrls]);
+
+  useEffect(() => {
+    mediaUrlsRef.current = mediaUrls;
+  }, [mediaUrls]);
 
   useEffect(() => {
     let cancelled = false;
@@ -609,6 +645,7 @@ export function App() {
       cancelActiveExport();
       importedFontUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       Object.values(audioUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+      Object.values(mediaUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
     };
   }, []);
 
@@ -626,6 +663,10 @@ export function App() {
     selection?.kind === 'clip'
       ? videoClips.find((clip) => clip.id === selection.id)
       : null;
+  const selectedImageClip =
+    selection?.kind === 'image'
+      ? imageClips.find((clip) => clip.id === selection.id)
+      : null;
   const selectedSourceAudioClip =
     selection?.kind === 'sourceAudio'
       ? videoClips.find((clip) => clip.id === selection.id)
@@ -637,6 +678,10 @@ export function App() {
   const audioSourceMap = useMemo(
     () => new Map(audioSources.map((source) => [source.id, source])),
     [audioSources]
+  );
+  const mediaSourceMap = useMemo(
+    () => new Map(mediaSources.map((source) => [source.id, source])),
+    [mediaSources]
   );
   const clipRanges = useMemo(
     () => getClipTimelineRanges(videoClips, transitions),
@@ -650,15 +695,32 @@ export function App() {
     () => findClipRangeAtTime(clipRanges, currentTime),
     [clipRanges, currentTime]
   );
+  const activePreviewClip = useMemo(
+    () =>
+      activeClipRange
+        ? applyVideoClipKeyframes(activeClipRange.clip, keyframes, currentTime)
+        : undefined,
+    [activeClipRange, currentTime, keyframes]
+  );
   const transitionPreview = useMemo(
     () => getTransitionPreviewAtTime(clipRanges, transitions, currentTime),
     [clipRanges, currentTime, transitions]
   );
+  const activeVideoSourceId = activeClipRange?.clip.sourceId ?? primaryVideoSourceId;
+  const previewVideoUrl = mediaUrls[activeVideoSourceId] ?? videoUrl;
+  const transitionVideoSourceId = transitionPreview
+    ? videoClips.find((clip) => clip.id === transitionPreview.transition.toClipId)?.sourceId ??
+      primaryVideoSourceId
+    : primaryVideoSourceId;
+  const transitionPreviewUrl = mediaUrls[transitionVideoSourceId] ?? videoUrl;
   const activeCues = cues.filter(
     (cue) => cue.start <= currentTime && cue.end >= currentTime
   );
   const activeOverlays = overlays.filter(
     (overlay) => overlay.start <= currentTime && overlay.end >= currentTime
+  );
+  const activeImageClips = imageClips.filter(
+    (clip) => clip.start <= currentTime && clip.end >= currentTime
   );
   const activeEffects = effects.filter(
     (effect) => effect.start <= currentTime && effect.end >= currentTime
@@ -668,18 +730,25 @@ export function App() {
     const maxOverlayEnd = Math.max(0, ...overlays.map((overlay) => overlay.end));
     const maxEffectEnd = Math.max(0, ...effects.map((effect) => effect.end));
     const maxAudioEnd = Math.max(0, ...audioClips.map((clip) => clip.end));
+    const maxImageEnd = Math.max(0, ...imageClips.map((clip) => clip.end));
     return Math.max(
       mediaTimelineDuration,
       maxCueEnd,
       maxOverlayEnd,
       maxEffectEnd,
       maxAudioEnd,
+      maxImageEnd,
       10
     );
-  }, [audioClips, cues, effects, mediaTimelineDuration, overlays]);
-  const outputDimensions = getExportDimensions(dimensions, exportPreset);
+  }, [audioClips, cues, effects, imageClips, mediaTimelineDuration, overlays]);
+  const outputDimensions = getExportDimensions(
+    dimensions,
+    exportPreset,
+    customExportDimensions
+  );
   const cueDiagnostics = useMemo(() => getCueDiagnostics(cues), [cues]);
-  const hasExportableLayers = cues.length + overlays.length + effects.length + audioClips.length > 0;
+  const hasExportableLayers =
+    cues.length + overlays.length + effects.length + imageClips.length + audioClips.length > 0;
   const hasVideoEdit = videoClips.length > 0;
   const selectedClipIndex = selectedClip
     ? videoClips.findIndex((clip) => clip.id === selectedClip.id)
@@ -705,13 +774,17 @@ export function App() {
   const hasResettableProject =
     Boolean(videoFile) ||
     Boolean(restoredVideoName) ||
+    mediaSources.length > 0 ||
     cues.length > 0 ||
     overlays.length > 0 ||
     effects.length > 0 ||
     videoClips.length > 0 ||
+    imageClips.length > 0 ||
     transitions.length > 0 ||
     audioSources.length > 0 ||
     audioClips.length > 0 ||
+    keyframes.length > 0 ||
+    Object.keys(mediaFiles).length > 0 ||
     Object.keys(audioFiles).length > 0 ||
     fontAssets.length > 1 ||
     exportUrl !== null;
@@ -726,11 +799,12 @@ export function App() {
         clipRanges,
         audioClips,
         audioSourceMap,
+        imageClips,
         cues,
         overlays,
         effects
       ),
-    [audioClips, audioSourceMap, clipRanges, cues, effects, overlays, selection]
+    [audioClips, audioSourceMap, clipRanges, cues, effects, imageClips, overlays, selection]
   );
   const cutRangeStateLabel = hasCutRange
     ? `${formatClock(cutRangeStart ?? 0)} - ${formatClock(cutRangeEnd ?? 0)}`
@@ -911,16 +985,17 @@ export function App() {
     setVideoUrl(URL.createObjectURL(file));
     if (!options.preserveProject) {
       resetEditor({
-        cues: [],
-        overlays: [],
-        effects: [],
-        videoClips: [],
-        transitions: [],
-        audioSources: [],
-        audioClips: []
+        ...createEmptyEditorSnapshot(),
+        mediaSources: [createMediaSourceMeta(file, 'video', undefined, primaryVideoSourceId)]
       });
       clearAudioRuntimeState();
+      clearMediaRuntimeState();
     }
+    setMediaFiles((previous) => ({ ...previous, [primaryVideoSourceId]: file }));
+    setMediaUrls((previous) => {
+      if (previous[primaryVideoSourceId]) URL.revokeObjectURL(previous[primaryVideoSourceId]);
+      return { ...previous, [primaryVideoSourceId]: URL.createObjectURL(file) };
+    });
     setCurrentTime(0);
     setDuration(0);
     setDimensions(defaultDimensions);
@@ -1029,6 +1104,114 @@ export function App() {
   function openAudioPicker(kind: AudioSourceKind) {
     audioImportKindRef.current = kind;
     audioInputRef.current?.click();
+  }
+
+  async function importMediaFiles(files: File[]) {
+    const supportedFiles = files.filter(
+      (file) => isVideoFile(file) || isImageFile(file) || isAudioFile(file)
+    );
+    if (supportedFiles.length === 0) {
+      setStatus('영상, 이미지, 오디오 파일만 가져올 수 있습니다.');
+      return;
+    }
+
+    const mediaAdds: MediaSourceMeta[] = [];
+    const nextMediaFiles: MediaFileMap = {};
+    const nextMediaUrls: MediaUrlMap = {};
+    const audioFilesToImport: File[] = [];
+    let relinkedMediaCount = 0;
+
+    for (const file of supportedFiles) {
+      if (isAudioFile(file) && !isVideoFile(file)) {
+        audioFilesToImport.push(file);
+        continue;
+      }
+
+      const kind: MediaSourceKind = isImageFile(file) ? 'image' : 'video';
+      const existingSource = mediaSources.find(
+        (source) =>
+          !mediaFiles[source.id] &&
+          source.kind === kind &&
+          doesFileMatchMediaSource(file, source)
+      );
+      const source =
+        existingSource ??
+        (await createMediaSourceMetaFromFile(file, kind).catch(() =>
+          createMediaSourceMeta(file, kind)
+        ));
+      if (existingSource) {
+        relinkedMediaCount += 1;
+      } else {
+        mediaAdds.push(source);
+      }
+      nextMediaFiles[source.id] = file;
+      nextMediaUrls[source.id] = URL.createObjectURL(file);
+    }
+
+    if (mediaAdds.length > 0) {
+      setMediaFiles((previous) => ({ ...previous, ...nextMediaFiles }));
+      setMediaUrls((previous) => ({ ...previous, ...nextMediaUrls }));
+      commitEditor((snapshot) => ({
+        ...snapshot,
+        mediaSources: [...snapshot.mediaSources, ...mediaAdds]
+      }));
+      setPanelMode('media');
+      setStatus(`미디어 ${mediaAdds.length}개를 보관함에 추가했습니다.`);
+    }
+
+    if (mediaAdds.length === 0 && relinkedMediaCount > 0) {
+      setMediaFiles((previous) => ({ ...previous, ...nextMediaFiles }));
+      setMediaUrls((previous) => ({ ...previous, ...nextMediaUrls }));
+      setPanelMode('media');
+      setStatus(`미디어 파일 ${relinkedMediaCount}개를 다시 연결했습니다.`);
+    } else if (relinkedMediaCount > 0) {
+      setStatus(`미디어 ${mediaAdds.length}개 추가 · ${relinkedMediaCount}개 다시 연결`);
+    }
+
+    if (audioFilesToImport.length > 0) {
+      await importAudioFiles(audioFilesToImport, 'music');
+    }
+  }
+
+  function addMediaSourceToTimeline(sourceId: string) {
+    const source = mediaSources.find((item) => item.id === sourceId);
+    if (!source) return;
+
+    if (source.kind === 'video') {
+      const sourceDuration = Math.max(MIN_CUE_DURATION, source.duration ?? (duration || 3));
+      const clip = createDefaultVideoClip(sourceDuration, source.id);
+      commitEditor((snapshot) => ({
+        ...snapshot,
+        videoClips: [...snapshot.videoClips, clip],
+        transitions: normalizeTransitionsForClips([...snapshot.videoClips, clip], snapshot.transitions)
+      }));
+      setSelection({ kind: 'clip', id: clip.id });
+      setPanelMode('video');
+      setStatus(`${source.name} 영상 조각을 타임라인에 추가했습니다.`);
+      return;
+    }
+
+    if (source.kind === 'image') {
+      const start = currentTime;
+      const imageClip: ImageClip = {
+        id: crypto.randomUUID(),
+        sourceId: source.id,
+        start,
+        end: start + 4,
+        x: 50,
+        y: 50,
+        scale: 1,
+        rotation: 0,
+        opacity: 1
+      };
+      commitEditor((snapshot) => ({
+        ...snapshot,
+        imageClips: [...snapshot.imageClips, imageClip]
+      }));
+      setSelection({ kind: 'image', id: imageClip.id });
+      setPanelMode('media');
+      setStatus(`${source.name} 이미지를 타임라인에 추가했습니다.`);
+    }
   }
 
   async function importAudioFiles(files: File[], kind: AudioSourceKind) {
@@ -1214,6 +1397,13 @@ export function App() {
     setAudioWaveforms({});
   }
 
+  function clearMediaRuntimeState() {
+    Object.values(mediaUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+    mediaUrlsRef.current = {};
+    setMediaFiles({});
+    setMediaUrls({});
+  }
+
   function resetProjectState() {
     resetExportState();
     resetImportedFonts();
@@ -1234,16 +1424,9 @@ export function App() {
     setDuration(0);
     setCurrentTime(0);
     setIsPlaying(false);
-    resetEditor({
-      cues: [],
-      overlays: [],
-      effects: [],
-      videoClips: [],
-      transitions: [],
-      audioSources: [],
-      audioClips: []
-    });
+    resetEditor(createEmptyEditorSnapshot());
     clearAudioRuntimeState();
+    clearMediaRuntimeState();
     setSelection(null);
     setPanelMode('video');
     setCutRange({ start: null, end: null });
@@ -1408,6 +1591,8 @@ export function App() {
     setPanelMode(
       nextSelection.kind === 'clip'
         ? 'video'
+        : nextSelection.kind === 'image'
+          ? 'media'
         : nextSelection.kind === 'audio' || nextSelection.kind === 'sourceAudio'
           ? 'audio'
         : nextSelection.kind === 'cue'
@@ -1477,6 +1662,28 @@ export function App() {
     );
   }
 
+  function updateImageClip(id: string, patch: Partial<ImageClip>, groupKey?: string) {
+    commitEditor(
+      (snapshot) => ({
+        ...snapshot,
+        imageClips: snapshot.imageClips.map((clip) =>
+          clip.id === id
+            ? {
+                ...clip,
+                ...patch,
+                x: clamp(patch.x ?? clip.x, 0, 100),
+                y: clamp(patch.y ?? clip.y, 0, 100),
+                scale: clamp(patch.scale ?? clip.scale, 0.05, 8),
+                rotation: clamp(patch.rotation ?? clip.rotation, -180, 180),
+                opacity: clamp(patch.opacity ?? clip.opacity, 0, 1)
+              }
+            : clip
+        )
+      }),
+      { groupKey }
+    );
+  }
+
   function updateOverlayTime(id: string, key: 'start' | 'end', value: number) {
     commitEditor(
       (snapshot) => ({
@@ -1525,7 +1732,7 @@ export function App() {
     );
   }
 
-  function ensureDefaultClip(sourceDuration: number) {
+  function ensureDefaultClip(sourceDuration: number, sourceId = primaryVideoSourceId) {
     if (!sourceDuration || sourceDuration <= 0) return;
 
     let createdClipId: string | null = null;
@@ -1533,6 +1740,7 @@ export function App() {
       if (snapshot.videoClips.length > 0) {
         const nextClips = snapshot.videoClips.map((clip) => ({
           ...clip,
+          sourceId: clip.sourceId || sourceId,
           sourceStart: clamp(clip.sourceStart, 0, Math.max(0, sourceDuration - MIN_CUE_DURATION)),
           sourceEnd: clamp(clip.sourceEnd, MIN_CUE_DURATION, sourceDuration)
         }));
@@ -1548,7 +1756,7 @@ export function App() {
         ...snapshot,
         videoClips: [
           (() => {
-            const clip = createDefaultVideoClip(sourceDuration);
+            const clip = createDefaultVideoClip(sourceDuration, sourceId);
             createdClipId = clip.id;
             return clip;
           })()
@@ -1643,25 +1851,8 @@ export function App() {
             ...patch,
             speed: patch.speed !== undefined ? normalizeSpeed(patch.speed) : clip.speed
           };
-          const sourceStart = clamp(
-            nextClip.sourceStart,
-            0,
-            Math.max(0, duration - MIN_CUE_DURATION)
-          );
-          const sourceEnd = clamp(
-            nextClip.sourceEnd,
-            sourceStart + MIN_CUE_DURATION,
-            duration || nextClip.sourceEnd
-          );
-
-          return {
-            ...nextClip,
-            sourceStart,
-            sourceEnd,
-            volume: normalizeAudioVolume(nextClip.volume),
-            fadeIn: normalizeAudioFade(nextClip.fadeIn, sourceEnd - sourceStart),
-            fadeOut: normalizeAudioFade(nextClip.fadeOut, sourceEnd - sourceStart)
-          };
+          const sourceDuration = getVideoClipSourceDuration(nextClip, mediaSourceMap, duration);
+          return normalizeVideoClip(nextClip, sourceDuration);
         });
 
         return {
@@ -1672,6 +1863,47 @@ export function App() {
       },
       { groupKey }
     );
+  }
+
+  function addVideoTransformKeyframes(clip: VideoClip) {
+    const time = Number(currentTime.toFixed(3));
+    const values: Array<[KeyframeProperty, number]> = [
+      ['x', clip.x ?? defaultVideoTransform.x],
+      ['y', clip.y ?? defaultVideoTransform.y],
+      ['scale', clip.scale ?? defaultVideoTransform.scale],
+      ['rotation', clip.rotation ?? defaultVideoTransform.rotation],
+      ['opacity', clip.opacity ?? defaultVideoTransform.opacity]
+    ];
+    const nextKeyframes = values.map(([property, value]) =>
+      createKeyframe('video', clip.id, property, time, value, 'ease-in-out')
+    );
+
+    commitEditor((snapshot) => ({
+      ...snapshot,
+      keyframes: [
+        ...snapshot.keyframes.filter(
+          (keyframe) =>
+            !(
+              keyframe.targetKind === 'video' &&
+              keyframe.targetId === clip.id &&
+              values.some(([property]) => property === keyframe.property) &&
+              Math.abs(keyframe.time - time) < 0.01
+            )
+        ),
+        ...nextKeyframes
+      ].sort((a, b) => a.time - b.time)
+    }));
+    setStatus(`조각 Transform 키프레임을 ${formatClock(time)}에 추가했습니다.`);
+  }
+
+  function clearVideoTransformKeyframes(clipId: string) {
+    commitEditor((snapshot) => ({
+      ...snapshot,
+      keyframes: snapshot.keyframes.filter(
+        (keyframe) => !(keyframe.targetKind === 'video' && keyframe.targetId === clipId)
+      )
+    }));
+    setStatus('선택 조각의 Transform 키프레임을 삭제했습니다.');
   }
 
   function trimVideoClip(
@@ -1814,6 +2046,21 @@ export function App() {
       setSelection({ kind: 'effect', id: clone.id });
     }
 
+    if (selectedImageClip) {
+      const clone = {
+        ...selectedImageClip,
+        id: crypto.randomUUID(),
+        start: selectedImageClip.start + 0.25,
+        end: selectedImageClip.end + 0.25
+      };
+      commitEditor((snapshot) => ({
+        ...snapshot,
+        imageClips: [...snapshot.imageClips, clone]
+      }));
+      setSelection({ kind: 'image', id: clone.id });
+      setPanelMode('media');
+    }
+
     if (selectedAudioClip) {
       const clone = {
         ...selectedAudioClip,
@@ -1892,6 +2139,16 @@ export function App() {
       setStatus('선택한 효과를 삭제했습니다.');
       return;
     }
+    if (selectedImageClip) {
+      commitEditor((snapshot) => ({
+        ...snapshot,
+        imageClips: snapshot.imageClips.filter((clip) => clip.id !== selectedImageClip.id),
+        keyframes: snapshot.keyframes.filter((keyframe) => keyframe.targetId !== selectedImageClip.id)
+      }));
+      setSelection(null);
+      setStatus('선택한 이미지를 삭제했습니다.');
+      return;
+    }
     if (selectedAudioClip) {
       commitEditor((snapshot) => ({
         ...snapshot,
@@ -1941,6 +2198,18 @@ export function App() {
       });
     }
 
+    if (selectedImageClip) {
+      const length = selectedImageClip.end - selectedImageClip.start;
+      updateImageClip(
+        selectedImageClip.id,
+        {
+          start: currentTime,
+          end: currentTime + Math.max(length, MIN_CUE_DURATION)
+        },
+        `image-move:${selectedImageClip.id}`
+      );
+    }
+
     if (selectedAudioClip) {
       const length = selectedAudioClip.end - selectedAudioClip.start;
       moveAudioClip(
@@ -1956,6 +2225,12 @@ export function App() {
     const next = snapPreviewPosition(x, y);
     setPreviewGuide(next.guide);
     updateOverlay(id, { x: next.x, y: next.y }, `overlay-position:${id}`);
+  }
+
+  function moveImageClipWithPreviewGuides(id: string, x: number, y: number) {
+    const next = snapPreviewPosition(x, y);
+    setPreviewGuide(next.guide);
+    updateImageClip(id, { x: next.x, y: next.y }, `image-position:${id}`);
   }
 
   function moveEffectWithPreviewGuides(id: string, x: number, y: number) {
@@ -1994,15 +2269,21 @@ export function App() {
       );
 
       resetEditor({
+        ...createEmptyEditorSnapshot(),
+        mediaSources: project.mediaSources ?? [],
         cues: project.cues,
         overlays: project.overlays ?? [],
         effects: project.effects ?? [],
         videoClips: project.videoClips ?? [],
+        imageClips: project.imageClips ?? [],
         transitions: project.transitions ?? [],
         audioSources: project.audioSources ?? [],
-        audioClips: project.audioClips ?? []
+        audioClips: project.audioClips ?? [],
+        keyframes: project.keyframes ?? [],
+        canvasSettings: project.canvasSettings ?? defaultCanvasSettings
       });
       clearAudioRuntimeState();
+      clearMediaRuntimeState();
       resetExportState();
       if (requiresVideoRelink) {
         if (videoRef.current) {
@@ -2040,6 +2321,8 @@ export function App() {
           ? ({ kind: 'cue', id: project.cues[0].id } as const)
           : project.overlays[0]
             ? ({ kind: 'overlay', id: project.overlays[0].id } as const)
+            : project.imageClips?.[0]
+              ? ({ kind: 'image', id: project.imageClips[0].id } as const)
             : project.effects[0]
               ? ({ kind: 'effect', id: project.effects[0].id } as const)
               : project.audioClips?.[0]
@@ -2049,6 +2332,8 @@ export function App() {
       setPanelMode(
         firstSelection?.kind === 'overlay'
           ? 'texts'
+          : firstSelection?.kind === 'image'
+            ? 'media'
           : firstSelection?.kind === 'effect'
             ? 'effects'
             : firstSelection?.kind === 'audio'
@@ -2079,9 +2364,13 @@ export function App() {
       overlays,
       effects,
       videoClips,
+      mediaSources,
+      imageClips,
       transitions,
       audioSources,
       audioClips,
+      keyframes,
+      canvasSettings,
       createdAt: projectCreatedAt,
       updatedAt: now
     };
@@ -2113,8 +2402,9 @@ export function App() {
 	    doneMessage,
 	    saveTarget,
 	    jobCues,
-	    jobOverlays,
+    jobOverlays,
     jobEffects,
+    jobImageClips,
     jobClips,
     jobTransitions,
     jobAudioClips
@@ -2125,6 +2415,7 @@ export function App() {
 	    jobCues: CaptionCue[];
     jobOverlays: TextOverlay[];
     jobEffects: InteractionEffect[];
+    jobImageClips: ImageClip[];
     jobClips: VideoClip[];
     jobTransitions: ClipTransition[];
     jobAudioClips: AudioClip[];
@@ -2173,11 +2464,15 @@ export function App() {
         {
           preset: exportPreset,
           dimensions,
+          customDimensions: customExportDimensions,
           sourceDuration: duration,
           hasAudio: preflight.hasAudio !== false,
+          videoFiles: mediaFiles,
           audioSources,
           audioClips: jobAudioClips,
           audioFiles,
+          imageClips: jobImageClips,
+          imageFiles: mediaFiles,
           fontFiles: fontAssets
             .map((asset) => asset.file)
             .filter((file): file is File => Boolean(file)),
@@ -2272,8 +2567,9 @@ export function App() {
 	      doneMessage: `${saveTarget.fileName} 다운로드 준비 완료`,
 	      saveTarget,
 	      jobCues: cues,
-	      jobOverlays: overlays,
+      jobOverlays: overlays,
       jobEffects: effects,
+      jobImageClips: imageClips,
       jobClips: videoClips,
       jobTransitions: transitions,
       jobAudioClips: audioClips
@@ -2308,6 +2604,7 @@ export function App() {
 	      jobCues: shiftTimelineItemsToClip(cues, rangeStart, rangeEnd),
       jobOverlays: shiftTimelineItemsToClip(overlays, rangeStart, rangeEnd),
       jobEffects: shiftTimelineItemsToClip(effects, rangeStart, rangeEnd),
+      jobImageClips: shiftTimelineItemsToClip(imageClips, rangeStart, rangeEnd),
       jobClips: [selectedClip],
       jobTransitions: [],
       jobAudioClips: shiftAudioClipsToClip(audioClips, rangeStart, rangeEnd)
@@ -2471,21 +2768,28 @@ export function App() {
         project.overlays.length === 0 &&
         project.effects.length === 0 &&
         (project.videoClips?.length ?? 0) === 0 &&
+        (project.imageClips?.length ?? 0) === 0 &&
         (project.audioClips?.length ?? 0) === 0
       ) {
         return;
       }
 
       resetEditor({
+        ...createEmptyEditorSnapshot(),
+        mediaSources: project.mediaSources ?? [],
         cues: project.cues,
         overlays: project.overlays,
         effects: project.effects,
         videoClips: project.videoClips ?? [],
+        imageClips: project.imageClips ?? [],
         transitions: project.transitions ?? [],
         audioSources: project.audioSources ?? [],
-        audioClips: project.audioClips ?? []
+        audioClips: project.audioClips ?? [],
+        keyframes: project.keyframes ?? [],
+        canvasSettings: project.canvasSettings ?? defaultCanvasSettings
       });
       clearAudioRuntimeState();
+      clearMediaRuntimeState();
       setProjectCreatedAt(project.createdAt);
       setLastAutosavedAt(project.updatedAt);
       const projectVideoName = project.mediaMeta?.name ?? project.videoName ?? null;
@@ -2498,6 +2802,8 @@ export function App() {
           ? ({ kind: 'cue', id: project.cues[0].id } as const)
           : project.overlays[0]
             ? ({ kind: 'overlay', id: project.overlays[0].id } as const)
+            : project.imageClips?.[0]
+              ? ({ kind: 'image', id: project.imageClips[0].id } as const)
             : project.effects[0]
               ? ({ kind: 'effect', id: project.effects[0].id } as const)
               : project.audioClips?.[0]
@@ -2507,6 +2813,8 @@ export function App() {
       setPanelMode(
         firstSelection?.kind === 'overlay'
           ? 'texts'
+          : firstSelection?.kind === 'image'
+            ? 'media'
           : firstSelection?.kind === 'effect'
             ? 'effects'
             : firstSelection?.kind === 'audio'
@@ -2565,6 +2873,7 @@ export function App() {
       overlays.length === 0 &&
       effects.length === 0 &&
       videoClips.length === 0 &&
+      imageClips.length === 0 &&
       audioClips.length === 0
     ) {
       return;
@@ -2580,9 +2889,13 @@ export function App() {
         overlays,
         effects,
         videoClips,
+        mediaSources,
+        imageClips,
         transitions,
         audioSources,
         audioClips,
+        keyframes,
+        canvasSettings,
         createdAt: projectCreatedAt,
         updatedAt: now
       };
@@ -2597,7 +2910,11 @@ export function App() {
     effects,
     audioClips,
     audioSources,
+    canvasSettings,
     overlays,
+    imageClips,
+    keyframes,
+    mediaSources,
     projectCreatedAt,
     mediaMeta,
     restoredVideoName,
@@ -2626,6 +2943,13 @@ export function App() {
     }
 
     if (
+      selection?.kind === 'image' &&
+      !imageClips.some((clip) => clip.id === selection.id)
+    ) {
+      setSelection(null);
+    }
+
+    if (
       selection?.kind === 'clip' &&
       !videoClips.some((clip) => clip.id === selection.id)
     ) {
@@ -2645,7 +2969,7 @@ export function App() {
     ) {
       setSelection(null);
     }
-  }, [audioClips, cues, effects, overlays, selection, videoClips]);
+  }, [audioClips, cues, effects, imageClips, overlays, selection, videoClips]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -2741,8 +3065,13 @@ export function App() {
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
         event.preventDefault();
-        const file = [...event.dataTransfer.files].find((item) => isVideoFile(item));
-        if (file) handleVideoFile(file);
+        const files = [...event.dataTransfer.files];
+        const videoOnly = files.length === 1 && isVideoFile(files[0]);
+        if (videoOnly && !hasResettableProject) {
+          handleVideoFile(files[0]);
+          return;
+        }
+        if (files.length > 0) void importMediaFiles(files);
       }}
     >
       <input
@@ -2753,6 +3082,18 @@ export function App() {
         onChange={(event) => {
           const file = event.target.files?.[0];
           if (file) handleSelectedVideoFile(file);
+          event.currentTarget.value = '';
+        }}
+      />
+      <input
+        ref={mediaInputRef}
+        type="file"
+        accept="video/*,image/*,audio/*"
+        multiple
+        hidden
+        onChange={(event) => {
+          const files = [...(event.target.files ?? [])];
+          if (files.length > 0) void importMediaFiles(files);
           event.currentTarget.value = '';
         }}
       />
@@ -2872,8 +3213,44 @@ export function App() {
                 aria-label="MP4 export preset"
               >
                 <option value="fast720">720p 빠른 렌더</option>
+                <option value="hd1080">1080p</option>
                 <option value="source">원본 해상도</option>
+                <option value="shorts1080">쇼츠 1080x1920</option>
+                <option value="custom">사용자 지정</option>
               </select>
+              {exportPreset === 'custom' && (
+                <span className="export-custom-size">
+                  <input
+                    type="number"
+                    min={120}
+                    max={7680}
+                    step={2}
+                    value={customExportDimensions.width}
+                    aria-label="사용자 지정 가로 해상도"
+                    onChange={(event) =>
+                      setCustomExportDimensions((current) => ({
+                        ...current,
+                        width: Number(event.target.value)
+                      }))
+                    }
+                  />
+                  <span>x</span>
+                  <input
+                    type="number"
+                    min={120}
+                    max={7680}
+                    step={2}
+                    value={customExportDimensions.height}
+                    aria-label="사용자 지정 세로 해상도"
+                    onChange={(event) =>
+                      setCustomExportDimensions((current) => ({
+                        ...current,
+                        height: Number(event.target.value)
+                      }))
+                    }
+                  />
+                </span>
+              )}
               <button
                 type="button"
                 className="primary mp4-export-button"
@@ -2904,6 +3281,10 @@ export function App() {
               >
                 <Upload size={17} />
                 영상
+              </button>
+              <button type="button" onClick={() => mediaInputRef.current?.click()}>
+                <Film size={17} />
+                미디어
               </button>
               <button type="button" onClick={() => subtitleInputRef.current?.click()}>
                 <Captions size={17} />
@@ -3072,29 +3453,40 @@ export function App() {
                 ))}
               </div>
             </div>
-            {videoUrl ? (
+            {previewVideoUrl ? (
               <div className="video-stage" onClick={() => void togglePlayback()}>
                 <video
                   ref={videoRef}
-                  src={videoUrl}
+                  src={previewVideoUrl}
+                  style={videoPreviewTransformStyle(activePreviewClip)}
                   onLoadedMetadata={(event) => {
                     const element = event.currentTarget;
                     const sourceDuration = element.duration || 0;
-                    setDuration(sourceDuration);
-                    setDimensions({
+                    const nextDimensions = {
                       width: element.videoWidth || defaultDimensions.width,
                       height: element.videoHeight || defaultDimensions.height
-                    });
+                    };
+                    setDuration(sourceDuration);
+                    setDimensions(nextDimensions);
                     setMediaMeta((current) =>
                       videoFile
                         ? createProjectMediaMeta(videoFile, {
                             duration: sourceDuration,
-                            width: element.videoWidth || defaultDimensions.width,
-                            height: element.videoHeight || defaultDimensions.height
+                            ...nextDimensions
                           })
                         : current
                     );
-                    ensureDefaultClip(sourceDuration);
+                    if (videoFile) {
+                      const primarySource = createMediaSourceMeta(videoFile, 'video', {
+                        duration: sourceDuration,
+                        ...nextDimensions
+                      }, primaryVideoSourceId);
+                      commitEditor((snapshot) => ({
+                        ...snapshot,
+                        mediaSources: upsertMediaSource(snapshot.mediaSources, primarySource)
+                      }));
+                    }
+                    ensureDefaultClip(sourceDuration, primaryVideoSourceId);
                   }}
                   onPlay={() => setIsPlaying(true)}
                   onPause={() => setIsPlaying(false)}
@@ -3102,7 +3494,7 @@ export function App() {
                 {transitionPreview && (
                   <video
                     ref={transitionVideoRef}
-                    src={videoUrl}
+                    src={transitionPreviewUrl ?? undefined}
                     className={`transition-preview-video transition-${transitionPreview.transition.kind}`}
                     muted
                     aria-hidden="true"
@@ -3145,6 +3537,28 @@ export function App() {
                       }
                     />
                   ))}
+                  {activeImageClips.map((clip) => {
+                    const url = mediaUrls[clip.sourceId];
+                    if (!url) return null;
+
+                    return (
+                      <ImageClipPreview
+                        key={clip.id}
+                        clip={clip}
+                        url={url}
+                        selected={selection?.kind === 'image' && selection.id === clip.id}
+                        onSelect={() => {
+                          setSelection({ kind: 'image', id: clip.id });
+                          setPanelMode('media');
+                        }}
+                        onMove={(x, y) => moveImageClipWithPreviewGuides(clip.id, x, y)}
+                        onMoveEnd={clearPreviewGuides}
+                        onResize={(scale) =>
+                          updateImageClip(clip.id, { scale }, `image-scale:${clip.id}`)
+                        }
+                      />
+                    );
+                  })}
                   {activeOverlays.map((overlay) => (
                     <TextPreview
                       key={overlay.id}
@@ -3355,6 +3769,8 @@ export function App() {
               audioSources={audioSources}
               audioClips={audioClips}
               audioWaveforms={audioWaveforms}
+              imageClips={imageClips}
+              keyframes={keyframes}
               cues={cues}
             overlays={overlays}
             effects={effects}
@@ -3372,6 +3788,9 @@ export function App() {
               setPanelMode('audio');
             }}
             onMoveAudioClip={moveAudioClip}
+            onMoveImageClip={(id, start, end, groupKey) =>
+              updateImageClip(id, { start, end }, groupKey)
+            }
             onMoveCue={(id, start, end, groupKey) =>
               updateCue(id, { start, end }, groupKey)
             }
@@ -3428,6 +3847,14 @@ export function App() {
           <div className="panel-tabs">
             <button
               type="button"
+              className={panelMode === 'media' ? 'active' : ''}
+              onClick={() => setPanelMode('media')}
+            >
+              <Clapperboard size={17} />
+              미디어
+            </button>
+            <button
+              type="button"
               className={panelMode === 'video' ? 'active' : ''}
               onClick={() => setPanelMode('video')}
             >
@@ -3472,7 +3899,9 @@ export function App() {
             <button
               type="button"
               onClick={
-                panelMode === 'video'
+                panelMode === 'media'
+                  ? () => mediaInputRef.current?.click()
+                  : panelMode === 'video'
                   ? splitClipAtPlayhead
                   : panelMode === 'audio'
                     ? () => openAudioPicker('music')
@@ -3484,7 +3913,9 @@ export function App() {
               }
             >
               {panelMode === 'video' ? <Scissors size={17} /> : <Plus size={17} />}
-              {panelMode === 'video'
+              {panelMode === 'media'
+                ? '미디어 추가'
+                : panelMode === 'video'
                 ? '조각 분할'
                 : panelMode === 'audio'
                   ? '음악 추가'
@@ -3518,13 +3949,27 @@ export function App() {
             </button>
           </div>
 
-          {panelMode === 'video' ? (
+          {panelMode === 'media' ? (
+            <MediaPanel
+              sources={mediaSources}
+              sourceFiles={mediaFiles}
+              imageClips={imageClips}
+              selectedImageClip={selectedImageClip}
+              onImport={() => mediaInputRef.current?.click()}
+              onAddToTimeline={addMediaSourceToTimeline}
+              onSelectImage={(id) => setSelection({ kind: 'image', id })}
+              onSeek={seek}
+              onUpdateImageClip={updateImageClip}
+            />
+          ) : panelMode === 'video' ? (
             <VideoPanel
               clips={videoClips}
               ranges={clipRanges}
               transitions={transitions}
               selectedClip={selectedClip}
               selectedTransition={selectedClipTransition}
+              currentTime={currentTime}
+              keyframes={keyframes}
               sourceDuration={duration}
               isExporting={isExporting}
               onSelect={(id) => setSelection({ kind: 'clip', id })}
@@ -3532,6 +3977,8 @@ export function App() {
               onMoveClip={moveSelectedClip}
               onUpdateClip={updateVideoClip}
               onUpdateTransition={updateTransitionAfterSelected}
+              onAddTransformKeyframes={addVideoTransformKeyframes}
+              onClearTransformKeyframes={clearVideoTransformKeyframes}
               onExportSelectedClip={() => void exportSelectedClipMp4()}
             />
           ) : panelMode === 'audio' ? (
@@ -4215,6 +4662,150 @@ function TextPreview({
   );
 }
 
+function ImageClipPreview({
+  clip,
+  url,
+  selected,
+  onSelect,
+  onMove,
+  onMoveEnd,
+  onResize
+}: {
+  clip: ImageClip;
+  url: string;
+  selected: boolean;
+  onSelect: () => void;
+  onMove: (x: number, y: number) => void;
+  onMoveEnd: () => void;
+  onResize: (scale: number) => void;
+}) {
+  const dragStartRef = useRef<{
+    bounds: { left: number; top: number; width: number; height: number };
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
+  const resizeStartRef = useRef<{ x: number; y: number; scale: number } | null>(null);
+
+  function startMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
+    if (!bounds) return;
+
+    const centerX = bounds.left + (clip.x / 100) * bounds.width;
+    const centerY = bounds.top + (clip.y / 100) * bounds.height;
+    dragStartRef.current = {
+      bounds: {
+        left: bounds.left,
+        top: bounds.top,
+        width: bounds.width,
+        height: bounds.height
+      },
+      offsetX: event.clientX - centerX,
+      offsetY: event.clientY - centerY
+    };
+  }
+
+  function moveToPointer(event: ReactPointerEvent<HTMLButtonElement>) {
+    const start = dragStartRef.current;
+    if (!start) return;
+
+    onMove(
+      clamp(
+        ((event.clientX - start.offsetX - start.bounds.left) / start.bounds.width) * 100,
+        0,
+        100
+      ),
+      clamp(
+        ((event.clientY - start.offsetY - start.bounds.top) / start.bounds.height) * 100,
+        0,
+        100
+      )
+    );
+  }
+
+  function resizeToPointer(event: ReactPointerEvent<HTMLSpanElement>) {
+    const start = resizeStartRef.current;
+    if (!start) return;
+    const distance = Math.hypot(event.clientX - start.x, event.clientY - start.y);
+    onResize(clamp(start.scale + distance / 220, 0.05, 8));
+  }
+
+  return (
+    <button
+      type="button"
+      className={`image-preview ${selected ? 'selected' : ''}`}
+      style={{
+        left: `${clip.x}%`,
+        top: `${clip.y}%`,
+        opacity: clip.opacity,
+        transform: `translate(-50%, -50%) rotate(${clip.rotation}deg) scale(${clip.scale})`
+      }}
+      onClick={(event) => {
+        event.stopPropagation();
+        onSelect();
+      }}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+        onSelect();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        startMove(event);
+      }}
+      onPointerMove={(event) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.stopPropagation();
+          moveToPointer(event);
+        }
+      }}
+      onPointerUp={(event) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.stopPropagation();
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+        dragStartRef.current = null;
+        onMoveEnd();
+      }}
+      onPointerCancel={() => {
+        dragStartRef.current = null;
+        onMoveEnd();
+      }}
+    >
+      <img src={url} alt="" draggable={false} />
+      {selected && (
+        <span
+          className="image-resize-handle"
+          aria-hidden="true"
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+            onSelect();
+            resizeStartRef.current = {
+              x: event.clientX,
+              y: event.clientY,
+              scale: clip.scale
+            };
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.stopPropagation();
+              resizeToPointer(event);
+            }
+          }}
+          onPointerUp={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.stopPropagation();
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+            resizeStartRef.current = null;
+          }}
+          onPointerCancel={() => {
+            resizeStartRef.current = null;
+          }}
+        />
+      )}
+    </button>
+  );
+}
+
 function InteractionEffectPreview({
   effect,
   selected,
@@ -4552,6 +5143,8 @@ function Timeline({
   audioSources,
   audioClips,
   audioWaveforms,
+  imageClips,
+  keyframes,
   cues,
   overlays,
   effects,
@@ -4566,6 +5159,7 @@ function Timeline({
   onReorderClip,
   onSelectSourceAudio,
   onMoveAudioClip,
+  onMoveImageClip,
   onMoveCue,
   onMoveOverlay,
   onMoveEffect,
@@ -4577,6 +5171,8 @@ function Timeline({
   audioSources: AudioSourceMeta[];
   audioClips: AudioClip[];
   audioWaveforms: Record<string, AudioWaveform>;
+  imageClips: ImageClip[];
+  keyframes: Keyframe[];
   cues: CaptionCue[];
   overlays: TextOverlay[];
   effects: InteractionEffect[];
@@ -4596,6 +5192,7 @@ function Timeline({
   onReorderClip: (clipId: string, targetIndex: number) => void;
   onSelectSourceAudio: (clipId: string) => void;
   onMoveAudioClip: (id: string, start: number, end: number, groupKey?: string) => void;
+  onMoveImageClip: (id: string, start: number, end: number, groupKey?: string) => void;
   onMoveCue: (id: string, start: number, end: number, groupKey?: string) => void;
   onMoveOverlay: (id: string, start: number, end: number, groupKey?: string) => void;
   onMoveEffect: (id: string, start: number, end: number, groupKey?: string) => void;
@@ -4628,6 +5225,7 @@ function Timeline({
   const [clipTrimPreview, setClipTrimPreview] = useState<ClipTrimPreviewState | null>(null);
   const [trackHeights, setTrackHeights] = useState<TimelineTrackHeights>({
     video: TIMELINE_VIDEO_TRACK_HEIGHT,
+    image: getTimelineTrackHeight(1),
     audio: getTimelineTrackHeight(2),
     cue: getTimelineTrackHeight(1),
     overlay: getTimelineTrackHeight(1),
@@ -4675,6 +5273,10 @@ function Timeline({
     () => layoutTimelineItems(audioClips, (clip) => ({ start: clip.start, end: clip.end })),
     [audioClips]
   );
+  const imageLayout = useMemo(
+    () => layoutTimelineItems(imageClips, (clip) => ({ start: clip.start, end: clip.end })),
+    [imageClips]
+  );
   const overlayLayout = useMemo(
     () => layoutTimelineItems(overlays, (overlay) => ({ start: overlay.start, end: overlay.end })),
     [overlays]
@@ -4684,11 +5286,13 @@ function Timeline({
     [effects]
   );
   const cueTrackBaseHeight = getTimelineTrackHeight(cueLayout.laneCount);
+  const imageTrackBaseHeight = getTimelineTrackHeight(imageLayout.laneCount);
   const audioTrackBaseHeight = getTimelineTrackHeight(Math.max(2, audioLayout.laneCount + 1));
   const overlayTrackBaseHeight = getTimelineTrackHeight(overlayLayout.laneCount);
   const effectTrackBaseHeight = getTimelineTrackHeight(effectLayout.laneCount);
   const trackDefaultHeights: TimelineTrackHeights = {
     video: TIMELINE_VIDEO_TRACK_HEIGHT,
+    image: imageTrackBaseHeight,
     audio: audioTrackBaseHeight,
     cue: cueTrackBaseHeight,
     overlay: overlayTrackBaseHeight,
@@ -4696,6 +5300,7 @@ function Timeline({
   };
   const trackMinimumHeights: TimelineTrackHeights = {
     video: TIMELINE_VIDEO_TRACK_MIN_HEIGHT,
+    image: imageTrackBaseHeight,
     audio: audioTrackBaseHeight,
     cue: cueTrackBaseHeight,
     overlay: overlayTrackBaseHeight,
@@ -4703,6 +5308,7 @@ function Timeline({
   };
   const trackMaximumHeights: TimelineTrackHeights = {
     video: TIMELINE_VIDEO_TRACK_MAX_HEIGHT,
+    image: Math.max(imageTrackBaseHeight, TIMELINE_TIMED_TRACK_MAX_HEIGHT),
     audio: Math.max(audioTrackBaseHeight, TIMELINE_TIMED_TRACK_MAX_HEIGHT),
     cue: Math.max(cueTrackBaseHeight, TIMELINE_TIMED_TRACK_MAX_HEIGHT),
     overlay: Math.max(overlayTrackBaseHeight, TIMELINE_TIMED_TRACK_MAX_HEIGHT),
@@ -4717,6 +5323,11 @@ function Timeline({
     Math.max(trackHeights.cue, cueTrackBaseHeight),
     trackMinimumHeights.cue,
     trackMaximumHeights.cue
+  );
+  const imageTrackHeight = clamp(
+    Math.max(trackHeights.image, imageTrackBaseHeight),
+    trackMinimumHeights.image,
+    trackMaximumHeights.image
   );
   const audioTrackHeight = clamp(
     Math.max(trackHeights.audio, audioTrackBaseHeight),
@@ -4735,12 +5346,13 @@ function Timeline({
   );
   const resolvedTrackHeights: TimelineTrackHeights = {
     video: videoTrackHeight,
+    image: imageTrackHeight,
     audio: audioTrackHeight,
     cue: cueTrackHeight,
     overlay: overlayTrackHeight,
     effect: effectTrackHeight
   };
-  const gridTemplateRows = `${TIMELINE_RULER_HEIGHT}px ${videoTrackHeight}px ${audioTrackHeight}px ${cueTrackHeight}px ${overlayTrackHeight}px ${effectTrackHeight}px`;
+  const gridTemplateRows = `${TIMELINE_RULER_HEIGHT}px ${videoTrackHeight}px ${imageTrackHeight}px ${audioTrackHeight}px ${cueTrackHeight}px ${overlayTrackHeight}px ${effectTrackHeight}px`;
   const videoItemLaneHeight = Math.max(44, videoTrackHeight - 8);
   const videoClipMetrics = getVideoClipMetrics(videoItemLaneHeight);
   const viewportThumbWidth = timelineWidth > 0 ? clamp((viewportWidth / timelineWidth) * 100, 2, 100) : 100;
@@ -4751,6 +5363,7 @@ function Timeline({
     clipRanges,
     audioClips,
     timelineAudioSourceMap,
+    imageClips,
     cues,
     overlays,
     effects
@@ -4758,6 +5371,8 @@ function Timeline({
   const selectedTrack: TimelineTrackKind | null = selection
     ? selection.kind === 'clip'
       ? 'video'
+      : selection.kind === 'image'
+        ? 'image'
       : selection.kind === 'audio' || selection.kind === 'sourceAudio'
         ? 'audio'
       : selection.kind === 'cue'
@@ -4777,6 +5392,7 @@ function Timeline({
       cutRange.start,
       cutRange.end,
       ...clipRanges.flatMap((range) => [range.start, range.end]),
+      ...imageClips.flatMap((clip) => [clip.start, clip.end]),
       ...audioClips.flatMap((clip) => [clip.start, clip.end]),
       ...cues.flatMap((cue) => [cue.start, cue.end]),
       ...overlays.flatMap((overlay) => [overlay.start, overlay.end]),
@@ -4790,7 +5406,7 @@ function Timeline({
           .map((point) => Number(clamp(point, 0, safeDuration).toFixed(3)))
       )
     ).sort((a, b) => a - b);
-  }, [audioClips, clipRanges, cues, currentTime, cutRange.end, cutRange.start, effects, overlays, safeDuration]);
+  }, [audioClips, clipRanges, cues, currentTime, cutRange.end, cutRange.start, effects, imageClips, overlays, safeDuration]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -5333,6 +5949,8 @@ function Timeline({
   ) {
     if (itemKind === 'audio') {
       onMoveAudioClip(id, start, end, groupKey);
+    } else if (itemKind === 'image') {
+      onMoveImageClip(id, start, end, groupKey);
     } else if (itemKind === 'cue') {
       onMoveCue(id, start, end, groupKey);
     } else if (itemKind === 'overlay') {
@@ -5588,6 +6206,18 @@ function Timeline({
             detail="비디오 조각"
             selected={selectedTrack === 'video'}
             resizing={resizingTrack === 'video'}
+            onResizeStart={beginTrackResize}
+            onResizeMove={updateTrackResize}
+            onResizeEnd={endTrackResize}
+            onResetHeight={resetTrackHeight}
+          />
+          <TimelineTrackHeader
+            track="image"
+            label="이미지"
+            count={imageClips.length}
+            detail={`${Math.max(1, imageLayout.laneCount)}줄 레이어`}
+            selected={selectedTrack === 'image'}
+            resizing={resizingTrack === 'image'}
             onResizeStart={beginTrackResize}
             onResizeMove={updateTrackResize}
             onResizeEnd={endTrackResize}
@@ -5918,6 +6548,38 @@ function Timeline({
                     {label}
                   </span>
                 );
+              })}
+              {keyframes
+                .filter((keyframe) => keyframe.targetKind === 'video' && isRangeVisible(keyframe.time, keyframe.time))
+                .map((keyframe) => (
+                  <span
+                    key={keyframe.id}
+                    className={`timeline-keyframe-marker ${
+                      selection?.kind === 'clip' && selection.id === keyframe.targetId
+                        ? 'is-active'
+                        : ''
+                    }`}
+                    style={{ left: `${timelineX(keyframe.time)}px` }}
+                    title={`${keyframe.property} · ${formatClock(keyframe.time)}`}
+                  />
+                ))}
+            </TimelineLane>
+            <TimelineLane
+              track="image"
+              height={imageTrackHeight}
+              className="image-lane"
+              selected={selectedTrack === 'image'}
+              resizing={resizingTrack === 'image'}
+              onResizeStart={beginTrackResize}
+              onResizeMove={updateTrackResize}
+              onResizeEnd={endTrackResize}
+              onResetHeight={resetTrackHeight}
+            >
+              {imageLayout.layouts.map((layout) => {
+                const clip = layout.item;
+                if (!isRangeVisible(clip.start, clip.end)) return null;
+                const title = timelineClipTitle('이미지', '이미지 클립', clip.start, clip.end);
+                return renderTimedItem(layout, 'image', 'image-item', 'IMG', '이미지', title);
               })}
             </TimelineLane>
             <TimelineLane
@@ -6279,6 +6941,7 @@ function TimelineTrackHeader({
 function getTimelineTrackCode(track: TimelineTrackKind) {
   const codes: Record<TimelineTrackKind, string> = {
     video: 'V1',
+    image: 'I1',
     audio: 'A1',
     cue: 'CC',
     overlay: 'T',
@@ -6338,12 +7001,209 @@ function TimelineLane({
   );
 }
 
+function MediaPanel({
+  sources,
+  sourceFiles,
+  imageClips,
+  selectedImageClip,
+  onImport,
+  onAddToTimeline,
+  onSelectImage,
+  onSeek,
+  onUpdateImageClip
+}: {
+  sources: MediaSourceMeta[];
+  sourceFiles: MediaFileMap;
+  imageClips: ImageClip[];
+  selectedImageClip: ImageClip | null | undefined;
+  onImport: () => void;
+  onAddToTimeline: (sourceId: string) => void;
+  onSelectImage: (id: string) => void;
+  onSeek: (time: number) => void;
+  onUpdateImageClip: (id: string, patch: Partial<ImageClip>, groupKey?: string) => void;
+}) {
+  const sourceMap = new Map(sources.map((source) => [source.id, source]));
+  const missingCount = sources.filter((source) => !sourceFiles[source.id]).length;
+
+  return (
+    <div className="panel-body media-panel-body">
+      <div className="clip-concept-card">
+        <strong>미디어 보관함</strong>
+        <span>여러 영상과 이미지를 보관하고 필요한 소스를 타임라인에 배치합니다.</span>
+      </div>
+
+      <button type="button" className="wide-action-button" onClick={onImport}>
+        <Upload size={16} />
+        영상/이미지/오디오 가져오기
+      </button>
+
+      {missingCount > 0 && (
+        <div className="audio-relink-note">
+          <strong>미디어 파일 {missingCount}개 재연결 필요</strong>
+          <span>프로젝트에는 정보만 저장됩니다. 같은 파일을 다시 가져오면 이어서 편집할 수 있습니다.</span>
+        </div>
+      )}
+
+      <div className="item-list media-source-list">
+        {sources.length === 0 && <p className="empty-copy">가져온 미디어 없음</p>}
+        {sources.map((source) => {
+          const isMissing = !sourceFiles[source.id];
+          const detail = [
+            source.kind === 'video' && source.duration !== undefined
+              ? formatClock(source.duration)
+              : '',
+            source.width && source.height ? `${source.width}x${source.height}` : '',
+            formatFileSize(source.size)
+          ].filter(Boolean).join(' · ');
+
+          return (
+            <article key={source.id} className={`media-source-card ${isMissing ? 'is-missing' : ''}`}>
+              <span className="media-source-kind">{source.kind === 'image' ? 'IMG' : 'VID'}</span>
+              <div className="media-source-copy">
+                <strong>{source.name}</strong>
+                <small>{detail || '로컬 파일'}</small>
+              </div>
+              <button type="button" onClick={() => onAddToTimeline(source.id)} disabled={isMissing}>
+                <Plus size={14} />
+                배치
+              </button>
+            </article>
+          );
+        })}
+      </div>
+
+      <div className="item-list media-clip-list">
+        {imageClips.length > 0 && <div className="audio-list-section-title">이미지 클립</div>}
+        {imageClips.map((clip, index) => {
+          const source = sourceMap.get(clip.sourceId);
+
+          return (
+            <button
+              type="button"
+              key={clip.id}
+              className={selectedImageClip?.id === clip.id ? 'item-card clip-card active' : 'item-card clip-card'}
+              onClick={() => {
+                onSelectImage(clip.id);
+                onSeek(clip.start);
+              }}
+            >
+              <span className="clip-card-index">I{index + 1}</span>
+              <div className="clip-card-main">
+                <strong>{source?.name ?? `이미지 ${index + 1}`}</strong>
+                <small>
+                  {formatClock(clip.start)} - {formatClock(clip.end)}
+                </small>
+              </div>
+              <div className="clip-card-badges">
+                <span>{Math.round(clip.scale * 100)}%</span>
+                <span>{Math.round(clip.opacity * 100)}%</span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {selectedImageClip && (
+        <div className="inspector">
+          <div className="field-grid two">
+            <NumberField
+              label="시작"
+              value={selectedImageClip.start}
+              min={0}
+              step={0.05}
+              onChange={(value) =>
+                onUpdateImageClip(
+                  selectedImageClip.id,
+                  {
+                    start: value,
+                    end: Math.max(value + MIN_CUE_DURATION, selectedImageClip.end)
+                  },
+                  `image-time:${selectedImageClip.id}:start`
+                )
+              }
+            />
+            <NumberField
+              label="종료"
+              value={selectedImageClip.end}
+              min={selectedImageClip.start + MIN_CUE_DURATION}
+              step={0.05}
+              onChange={(value) =>
+                onUpdateImageClip(
+                  selectedImageClip.id,
+                  { end: Math.max(selectedImageClip.start + MIN_CUE_DURATION, value) },
+                  `image-time:${selectedImageClip.id}:end`
+                )
+              }
+            />
+          </div>
+          <div className="field-grid two">
+            <NumberField
+              label="X"
+              value={selectedImageClip.x}
+              min={0}
+              max={100}
+              step={1}
+              onChange={(value) =>
+                onUpdateImageClip(selectedImageClip.id, { x: value }, `image-position:${selectedImageClip.id}`)
+              }
+            />
+            <NumberField
+              label="Y"
+              value={selectedImageClip.y}
+              min={0}
+              max={100}
+              step={1}
+              onChange={(value) =>
+                onUpdateImageClip(selectedImageClip.id, { y: value }, `image-position:${selectedImageClip.id}`)
+              }
+            />
+          </div>
+          <div className="field-grid two">
+            <NumberField
+              label="크기"
+              value={selectedImageClip.scale}
+              min={0.05}
+              max={8}
+              step={0.05}
+              onChange={(value) =>
+                onUpdateImageClip(selectedImageClip.id, { scale: value }, `image-scale:${selectedImageClip.id}`)
+              }
+            />
+            <NumberField
+              label="회전"
+              value={selectedImageClip.rotation}
+              min={-180}
+              max={180}
+              step={1}
+              onChange={(value) =>
+                onUpdateImageClip(selectedImageClip.id, { rotation: value }, `image-rotate:${selectedImageClip.id}`)
+              }
+            />
+          </div>
+          <NumberField
+            label="불투명도"
+            value={selectedImageClip.opacity}
+            min={0}
+            max={1}
+            step={0.05}
+            onChange={(value) =>
+              onUpdateImageClip(selectedImageClip.id, { opacity: value }, `image-opacity:${selectedImageClip.id}`)
+            }
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function VideoPanel({
   clips,
   ranges,
   transitions,
   selectedClip,
   selectedTransition,
+  currentTime,
+  keyframes,
   sourceDuration,
   isExporting,
   onSelect,
@@ -6351,6 +7211,8 @@ function VideoPanel({
   onMoveClip,
   onUpdateClip,
   onUpdateTransition,
+  onAddTransformKeyframes,
+  onClearTransformKeyframes,
   onExportSelectedClip
 }: {
   clips: VideoClip[];
@@ -6358,6 +7220,8 @@ function VideoPanel({
   transitions: ClipTransition[];
   selectedClip: VideoClip | null | undefined;
   selectedTransition: ClipTransition | null | undefined;
+  currentTime: number;
+  keyframes: Keyframe[];
   sourceDuration: number;
   isExporting: boolean;
   onSelect: (id: string) => void;
@@ -6368,6 +7232,8 @@ function VideoPanel({
     kind: ClipTransitionKind | 'none',
     duration?: number
   ) => void;
+  onAddTransformKeyframes: (clip: VideoClip) => void;
+  onClearTransformKeyframes: (clipId: string) => void;
   onExportSelectedClip: () => void;
 }) {
   const selectedRange = selectedClip
@@ -6382,6 +7248,11 @@ function VideoPanel({
   const canMoveEarlier = selectedClipIndex > 0;
   const canMoveLater =
     selectedClipIndex >= 0 && selectedClipIndex < clips.length - 1;
+  const selectedTransformKeyframeCount = selectedClip
+    ? keyframes.filter(
+        (keyframe) => keyframe.targetKind === 'video' && keyframe.targetId === selectedClip.id
+      ).length
+    : 0;
 
   return (
     <div className="panel-body video-panel-body">
@@ -6518,6 +7389,143 @@ function VideoPanel({
               음소거
             </label>
           </div>
+
+          <section className="clip-transform-panel">
+            <div className="section-label">
+              <span>Transform</span>
+              <small>미리보기와 export 반영</small>
+            </div>
+            <div className="field-grid two">
+              <NumberField
+                label="X"
+                value={selectedClip.x ?? defaultVideoTransform.x}
+                min={0}
+                max={100}
+                step={1}
+                onChange={(value) =>
+                  onUpdateClip(selectedClip.id, { x: value }, `clip-transform:${selectedClip.id}`)
+                }
+              />
+              <NumberField
+                label="Y"
+                value={selectedClip.y ?? defaultVideoTransform.y}
+                min={0}
+                max={100}
+                step={1}
+                onChange={(value) =>
+                  onUpdateClip(selectedClip.id, { y: value }, `clip-transform:${selectedClip.id}`)
+                }
+              />
+            </div>
+            <div className="field-grid two">
+              <NumberField
+                label="확대"
+                value={selectedClip.scale ?? defaultVideoTransform.scale}
+                min={0.1}
+                max={8}
+                step={0.05}
+                onChange={(value) =>
+                  onUpdateClip(selectedClip.id, { scale: value }, `clip-transform:${selectedClip.id}`)
+                }
+              />
+              <NumberField
+                label="회전"
+                value={selectedClip.rotation ?? defaultVideoTransform.rotation}
+                min={-180}
+                max={180}
+                step={1}
+                onChange={(value) =>
+                  onUpdateClip(selectedClip.id, { rotation: value }, `clip-transform:${selectedClip.id}`)
+                }
+              />
+            </div>
+            <NumberField
+              label="불투명도"
+              value={selectedClip.opacity ?? defaultVideoTransform.opacity}
+              min={0}
+              max={1}
+              step={0.05}
+              onChange={(value) =>
+                onUpdateClip(selectedClip.id, { opacity: value }, `clip-transform:${selectedClip.id}`)
+              }
+            />
+            <div className="keyframe-action-row">
+              <div>
+                <strong>키프레임</strong>
+                <span>
+                  현재 {formatClock(currentTime)} · {selectedTransformKeyframeCount}개
+                </span>
+              </div>
+              <button type="button" onClick={() => onAddTransformKeyframes(selectedClip)}>
+                다이아몬드 추가
+              </button>
+              <button
+                type="button"
+                onClick={() => onClearTransformKeyframes(selectedClip.id)}
+                disabled={selectedTransformKeyframeCount === 0}
+              >
+                삭제
+              </button>
+            </div>
+            <div className="field-grid two">
+              <NumberField
+                label="Crop L"
+                value={selectedClip.crop?.left ?? 0}
+                min={0}
+                max={90}
+                step={1}
+                onChange={(value) =>
+                  onUpdateClip(
+                    selectedClip.id,
+                    { crop: { ...(selectedClip.crop ?? defaultVideoTransform.crop), left: value } },
+                    `clip-crop:${selectedClip.id}`
+                  )
+                }
+              />
+              <NumberField
+                label="Crop R"
+                value={selectedClip.crop?.right ?? 0}
+                min={0}
+                max={90}
+                step={1}
+                onChange={(value) =>
+                  onUpdateClip(
+                    selectedClip.id,
+                    { crop: { ...(selectedClip.crop ?? defaultVideoTransform.crop), right: value } },
+                    `clip-crop:${selectedClip.id}`
+                  )
+                }
+              />
+              <NumberField
+                label="Crop T"
+                value={selectedClip.crop?.top ?? 0}
+                min={0}
+                max={90}
+                step={1}
+                onChange={(value) =>
+                  onUpdateClip(
+                    selectedClip.id,
+                    { crop: { ...(selectedClip.crop ?? defaultVideoTransform.crop), top: value } },
+                    `clip-crop:${selectedClip.id}`
+                  )
+                }
+              />
+              <NumberField
+                label="Crop B"
+                value={selectedClip.crop?.bottom ?? 0}
+                min={0}
+                max={90}
+                step={1}
+                onChange={(value) =>
+                  onUpdateClip(
+                    selectedClip.id,
+                    { crop: { ...(selectedClip.crop ?? defaultVideoTransform.crop), bottom: value } },
+                    `clip-crop:${selectedClip.id}`
+                  )
+                }
+              />
+            </div>
+          </section>
 
           {selectedRange && (
             <div className="clip-summary">
@@ -7855,6 +8863,7 @@ function getTimelineSelectionSummary(
   clipRanges: ReturnType<typeof getClipTimelineRanges>,
   audioClips: AudioClip[],
   audioSourceMap: Map<string, AudioSourceMeta>,
+  imageClips: ImageClip[],
   cues: CaptionCue[],
   overlays: TextOverlay[],
   effects: InteractionEffect[]
@@ -7878,6 +8887,13 @@ function getTimelineSelectionSummary(
   if (selection.kind === 'cue') {
     const cue = cues.find((item) => item.id === selection.id);
     return cue ? `자막 · ${formatClock(cue.start)} - ${formatClock(cue.end)}` : '자막';
+  }
+
+  if (selection.kind === 'image') {
+    const image = imageClips.find((item) => item.id === selection.id);
+    return image
+      ? `이미지 · ${formatClock(image.start)} - ${formatClock(image.end)}`
+      : '이미지';
   }
 
   if (selection.kind === 'overlay') {
@@ -8087,12 +9103,179 @@ function formatTimelineTick(seconds: number) {
   return `${minutes}:${String(wholeSeconds).padStart(2, '0')}`;
 }
 
+function videoPreviewTransformStyle(clip: VideoClip | undefined): CSSProperties {
+  if (!clip) return {};
+
+  const crop = clip.crop ?? defaultVideoTransform.crop;
+  return {
+    transform: `translate(${(clip.x ?? defaultVideoTransform.x) - 50}%, ${(clip.y ?? defaultVideoTransform.y) - 50}%) rotate(${clip.rotation ?? defaultVideoTransform.rotation}deg) scale(${clip.scale ?? defaultVideoTransform.scale})`,
+    opacity: clip.opacity ?? defaultVideoTransform.opacity,
+    clipPath: `inset(${crop.top}% ${crop.right}% ${crop.bottom}% ${crop.left}%)`
+  };
+}
+
+function applyVideoClipKeyframes(
+  clip: VideoClip,
+  keyframes: Keyframe[],
+  time: number
+): VideoClip {
+  return {
+    ...clip,
+    x: getKeyframedValue(keyframes, 'video', clip.id, 'x', time, clip.x ?? defaultVideoTransform.x),
+    y: getKeyframedValue(keyframes, 'video', clip.id, 'y', time, clip.y ?? defaultVideoTransform.y),
+    scale: getKeyframedValue(
+      keyframes,
+      'video',
+      clip.id,
+      'scale',
+      time,
+      clip.scale ?? defaultVideoTransform.scale
+    ),
+    rotation: getKeyframedValue(
+      keyframes,
+      'video',
+      clip.id,
+      'rotation',
+      time,
+      clip.rotation ?? defaultVideoTransform.rotation
+    ),
+    opacity: getKeyframedValue(
+      keyframes,
+      'video',
+      clip.id,
+      'opacity',
+      time,
+      clip.opacity ?? defaultVideoTransform.opacity
+    )
+  };
+}
+
+function formatFileSize(size: number) {
+  if (!Number.isFinite(size) || size <= 0) return '';
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))}KB`;
+  return `${(size / 1024 / 1024).toFixed(size < 100 * 1024 * 1024 ? 1 : 0)}MB`;
+}
+
 function isVideoFile(file: File) {
   return file.type.startsWith('video/') || /\.(mp4|m4v|mov|webm|mkv|avi)$/i.test(file.name);
 }
 
 function isAudioFile(file: File) {
   return file.type.startsWith('audio/') || /\.(mp3|m4a|aac|wav|ogg|flac|aiff)$/i.test(file.name);
+}
+
+function isImageFile(file: File) {
+  return file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(file.name);
+}
+
+function createMediaSourceMeta(
+  file: File,
+  kind: MediaSourceKind,
+  details?: { duration?: number; width?: number; height?: number },
+  id: string = crypto.randomUUID()
+): MediaSourceMeta {
+  return {
+    id,
+    kind,
+    name: file.name,
+    size: file.size,
+    lastModified: file.lastModified,
+    ...(details?.duration !== undefined ? { duration: details.duration } : {}),
+    ...(details?.width !== undefined ? { width: details.width } : {}),
+    ...(details?.height !== undefined ? { height: details.height } : {})
+  };
+}
+
+async function createMediaSourceMetaFromFile(
+  file: File,
+  kind: MediaSourceKind
+): Promise<MediaSourceMeta> {
+  if (kind === 'video') {
+    return createMediaSourceMeta(file, kind, await readVideoMetadata(file));
+  }
+
+  if (kind === 'image') {
+    return createMediaSourceMeta(file, kind, await readImageDimensions(file));
+  }
+
+  if (kind === 'audio') {
+    return createMediaSourceMeta(file, kind, { duration: await readAudioDuration(file) });
+  }
+
+  return createMediaSourceMeta(file, kind);
+}
+
+async function readVideoMetadata(file: File) {
+  if (typeof document === 'undefined') return {};
+
+  const video = document.createElement('video');
+  const url = URL.createObjectURL(file);
+  video.preload = 'metadata';
+  video.muted = true;
+  video.src = url;
+
+  try {
+    await waitForMediaEvent(video, 'loadedmetadata', 4000);
+    return {
+      duration: Number.isFinite(video.duration) ? video.duration : undefined,
+      width: video.videoWidth || undefined,
+      height: video.videoHeight || undefined
+    };
+  } finally {
+    video.removeAttribute('src');
+    video.load();
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function readImageDimensions(file: File) {
+  if (typeof document === 'undefined') return {};
+
+  const url = URL.createObjectURL(file);
+  const image = new Image();
+  image.src = url;
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => reject(new Error('이미지 메타데이터를 읽지 못했습니다.')), 4000);
+      image.onload = () => {
+        window.clearTimeout(timeout);
+        resolve();
+      };
+      image.onerror = () => {
+        window.clearTimeout(timeout);
+        reject(new Error('이미지 파일을 읽지 못했습니다.'));
+      };
+    });
+
+    return {
+      width: image.naturalWidth || undefined,
+      height: image.naturalHeight || undefined
+    };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function upsertMediaSource(sources: MediaSourceMeta[], source: MediaSourceMeta) {
+  const index = sources.findIndex((item) => item.id === source.id);
+  if (index < 0) return [...sources, source];
+
+  return sources.map((item, itemIndex) =>
+    itemIndex === index ? { ...item, ...source } : item
+  );
+}
+
+function getVideoClipSourceDuration(
+  clip: VideoClip,
+  sourceMap: Map<string, MediaSourceMeta>,
+  fallbackDuration: number
+) {
+  const source = sourceMap.get(clip.sourceId ?? primaryVideoSourceId);
+  return Math.max(
+    MIN_CUE_DURATION,
+    source?.duration ?? fallbackDuration ?? clip.sourceEnd ?? MIN_CUE_DURATION
+  );
 }
 
 async function readAudioDuration(file: File) {
@@ -8140,6 +9323,15 @@ async function generateAudioWaveform(file: File): Promise<AudioWaveform> {
 }
 
 function doesFileMatchAudioSource(file: File, source: AudioSourceMeta) {
+  const nameMatches = file.name === source.name;
+  const sizeMatches = source.size <= 0 || file.size === source.size;
+  const modifiedMatches =
+    source.lastModified <= 0 || Math.abs(file.lastModified - source.lastModified) < 2000;
+
+  return nameMatches && sizeMatches && modifiedMatches;
+}
+
+function doesFileMatchMediaSource(file: File, source: MediaSourceMeta) {
   const nameMatches = file.name === source.name;
   const sizeMatches = source.size <= 0 || file.size === source.size;
   const modifiedMatches =
