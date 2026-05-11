@@ -3,6 +3,9 @@ import {
   defaultInteractionEffect,
   defaultTextOverlay,
   builtinPreviewFontFamily,
+  type AudioClip,
+  type AudioSourceKind,
+  type AudioSourceMeta,
   type CaptionCue,
   type ClipTransition,
   type ClipTransitionKind,
@@ -19,11 +22,17 @@ import {
 import { clamp, coerceCueBounds } from './time';
 import { sortCues } from './subtitle';
 import {
+  normalizeAudioClip,
+  normalizeAudioFade,
+  normalizeAudioVolume
+} from './audio-edit';
+import {
   DEFAULT_TRANSITION_DURATION,
   normalizeSpeed,
   normalizeTransitionsForClips
 } from './video-edit';
 
+const audioSourceKinds = new Set<AudioSourceKind>(['music', 'effect']);
 const positions = new Set<CaptionPosition>(['bottom', 'middle', 'top']);
 const alignments = new Set<TextAlign>(['left', 'center', 'right']);
 const transitionKinds = new Set<ClipTransitionKind>([
@@ -65,6 +74,15 @@ export function normalizeProjectFile(input: unknown): ProjectFile {
         input.transitions.map(normalizeTransition).filter(Boolean) as ClipTransition[]
       )
     : [];
+  const audioSources = Array.isArray(input.audioSources)
+    ? (input.audioSources.map(normalizeAudioSource).filter(Boolean) as AudioSourceMeta[])
+    : [];
+  const audioSourceMap = new Map(audioSources.map((source) => [source.id, source]));
+  const audioClips = Array.isArray(input.audioClips)
+    ? (input.audioClips
+        .map((clip) => normalizeAudioClipInput(clip, audioSourceMap))
+        .filter(Boolean) as AudioClip[])
+    : [];
   const createdAt = stringOr(input.createdAt, new Date().toISOString());
   const updatedAt = stringOr(input.updatedAt, createdAt);
 
@@ -77,6 +95,8 @@ export function normalizeProjectFile(input: unknown): ProjectFile {
     effects,
     videoClips,
     transitions,
+    audioSources,
+    audioClips,
     createdAt,
     updatedAt
   };
@@ -195,8 +215,55 @@ function normalizeVideoClipInput(input: unknown): VideoClip | null {
     sourceStart,
     sourceEnd,
     speed: normalizeSpeed(finiteNumber(input.speed, 1)),
-    muted: booleanOr(input.muted, false)
+    muted: booleanOr(input.muted, false),
+    volume: normalizeAudioVolume(optionalFiniteNumber(input.volume)),
+    fadeIn: normalizeAudioFade(optionalFiniteNumber(input.fadeIn), sourceEnd - sourceStart),
+    fadeOut: normalizeAudioFade(optionalFiniteNumber(input.fadeOut), sourceEnd - sourceStart)
   };
+}
+
+function normalizeAudioSource(input: unknown): AudioSourceMeta | null {
+  if (!isRecord(input) || typeof input.name !== 'string') return null;
+
+  return {
+    id: stringOr(input.id, crypto.randomUUID()),
+    name: input.name,
+    size: Math.max(0, finiteNumber(input.size, 0)),
+    lastModified: Math.max(0, finiteNumber(input.lastModified, 0)),
+    duration: Math.max(0.2, finiteNumber(input.duration, 0.2)),
+    kind: audioSourceKinds.has(input.kind as AudioSourceKind)
+      ? (input.kind as AudioSourceKind)
+      : 'music'
+  };
+}
+
+function normalizeAudioClipInput(
+  input: unknown,
+  audioSourceMap: Map<string, AudioSourceMeta>
+): AudioClip | null {
+  if (!isRecord(input) || typeof input.sourceId !== 'string') return null;
+
+  const source = audioSourceMap.get(input.sourceId);
+  if (!source) return null;
+  const start = finiteNumber(input.start, 0);
+  const end = finiteNumber(input.end, start + Math.min(source.duration, 3));
+
+  return normalizeAudioClip(
+    {
+      id: stringOr(input.id, crypto.randomUUID()),
+      sourceId: input.sourceId,
+      start,
+      end,
+      sourceStart: finiteNumber(input.sourceStart, 0),
+      sourceEnd: finiteNumber(input.sourceEnd, end - start),
+      volume: normalizeAudioVolume(optionalFiniteNumber(input.volume)),
+      muted: booleanOr(input.muted, false),
+      fadeIn: normalizeAudioFade(optionalFiniteNumber(input.fadeIn), end - start),
+      fadeOut: normalizeAudioFade(optionalFiniteNumber(input.fadeOut), end - start),
+      label: stringOr(input.label, source.name.replace(/\.[^.]+$/, ''))
+    },
+    source
+  );
 }
 
 function normalizeTransition(input: unknown): ClipTransition | null {

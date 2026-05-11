@@ -71,7 +71,9 @@ export function cloneSnapshot(snapshot: EditorSnapshot): EditorSnapshot {
     overlays: snapshot.overlays.map((overlay) => ({ ...overlay })),
     effects: snapshot.effects.map((effect) => ({ ...effect })),
     videoClips: snapshot.videoClips.map((clip) => ({ ...clip })),
-    transitions: snapshot.transitions.map((transition) => ({ ...transition }))
+    transitions: snapshot.transitions.map((transition) => ({ ...transition })),
+    audioSources: snapshot.audioSources.map((source) => ({ ...source })),
+    audioClips: snapshot.audioClips.map((clip) => ({ ...clip }))
   };
 }
 

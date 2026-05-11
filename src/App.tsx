@@ -2,6 +2,8 @@ import {
   AlignCenter,
   AlignLeft,
   AlignRight,
+  ArrowLeft,
+  ArrowRight,
   AlertTriangle,
   Captions,
   CircleHelp,
@@ -15,6 +17,7 @@ import {
   Hand,
   Maximize2,
   MousePointerClick,
+  Music,
   Pause,
   Play,
   Plus,
@@ -25,6 +28,8 @@ import {
   Redo2,
   Undo2,
   Upload,
+  Volume2,
+  VolumeX,
   X,
   ZoomIn,
   ZoomOut
@@ -32,6 +37,7 @@ import {
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type {
   CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   ReactNode,
@@ -71,6 +77,15 @@ import {
 } from './lib/fonts';
 import { normalizeProjectFile } from './lib/project';
 import {
+  createAudioClip,
+  createAudioSourceMeta,
+  getAudioClipDuration,
+  normalizeAudioClip,
+  normalizeAudioFade,
+  normalizeAudioVolume,
+  trimAudioClip
+} from './lib/audio-edit';
+import {
   DEFAULT_TRANSITION_DURATION,
   createDefaultVideoClip,
   createOrUpdateTransition,
@@ -81,6 +96,7 @@ import {
   getTransitionBetween,
   getTransitionPreviewAtTime,
   insertDuplicateClipAfter,
+  reorderClipRipple,
   normalizeSpeed,
   normalizeTransitionsForClips,
   removeTimelineRange,
@@ -94,6 +110,9 @@ import {
   defaultTextOverlay,
   interactionEffectPresets,
   builtinPreviewFontFamily,
+  type AudioClip,
+  type AudioSourceKind,
+  type AudioSourceMeta,
   type CaptionCue,
   type CaptionPosition,
   type CaptionStyle,
@@ -135,18 +154,22 @@ import {
 
 type Selection =
   | { kind: 'clip'; id: string }
+  | { kind: 'audio'; id: string }
   | { kind: 'cue'; id: string }
   | { kind: 'overlay'; id: string }
   | { kind: 'effect'; id: string }
   | null;
 
-type PanelMode = 'video' | 'captions' | 'texts' | 'effects';
+type PanelMode = 'video' | 'audio' | 'captions' | 'texts' | 'effects';
 type CutRange = { start: number | null; end: number | null };
 type TimelineTool = 'select' | 'pan';
-type TimelineItemKind = 'cue' | 'overlay' | 'effect';
-type TimelineTrackKind = 'video' | 'cue' | 'overlay' | 'effect';
+type TimelineItemKind = 'audio' | 'cue' | 'overlay' | 'effect';
+type TimelineTrackKind = 'video' | 'audio' | 'cue' | 'overlay' | 'effect';
 type TimelineTrackHeights = Record<TimelineTrackKind, number>;
 type TimelineThumbnail = { time: number; url: string };
+type AudioWaveform = number[];
+type AudioFileMap = Record<string, File>;
+type AudioUrlMap = Record<string, string>;
 type TimelineThumbnailRequest = TimelineThumbnailWindow;
 type PreviewGuideState = {
   vertical?: number;
@@ -425,6 +448,7 @@ export function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const transitionVideoRef = useRef<HTMLVideoElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
+  const audioInputRef = useRef<HTMLInputElement>(null);
   const subtitleInputRef = useRef<HTMLInputElement>(null);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const fontInputRef = useRef<HTMLInputElement>(null);
@@ -433,6 +457,9 @@ export function App() {
   const importedFontUrlsRef = useRef<string[]>([]);
   const playbackClockRef = useRef<number | null>(null);
   const videoImportModeRef = useRef<VideoImportMode>('normal');
+  const audioImportKindRef = useRef<AudioSourceKind>('music');
+  const audioPreviewRefs = useRef<Record<string, HTMLAudioElement | null>>({});
+  const audioUrlsRef = useRef<AudioUrlMap>({});
   const videoCacheVersionRef = useRef(0);
   const thumbnailCacheRef = useRef<Map<number, TimelineThumbnail>>(new Map());
   const thumbnailVideoUrlRef = useRef<string | null>(null);
@@ -449,7 +476,9 @@ export function App() {
       overlays: [],
       effects: [],
       videoClips: [],
-      transitions: []
+      transitions: [],
+      audioSources: [],
+      audioClips: []
     })
   );
   const [selection, setSelection] = useState<Selection>(null);
@@ -472,6 +501,9 @@ export function App() {
   const [projectCreatedAt, setProjectCreatedAt] = useState(new Date().toISOString());
   const [effectReplayTokens, setEffectReplayTokens] = useState<Record<string, number>>({});
   const [timelineThumbnails, setTimelineThumbnails] = useState<TimelineThumbnail[]>([]);
+  const [audioFiles, setAudioFiles] = useState<AudioFileMap>({});
+  const [audioUrls, setAudioUrls] = useState<AudioUrlMap>({});
+  const [audioWaveforms, setAudioWaveforms] = useState<Record<string, AudioWaveform>>({});
   const [thumbnailRequest, setThumbnailRequest] = useState<TimelineThumbnailRequest | null>(null);
   const [pendingResetAction, setPendingResetAction] = useState<PendingResetAction | null>(null);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
@@ -486,6 +518,8 @@ export function App() {
   const effects = editorHistory.present.effects;
   const videoClips = editorHistory.present.videoClips;
   const transitions = editorHistory.present.transitions;
+  const audioSources = editorHistory.present.audioSources;
+  const audioClips = editorHistory.present.audioClips;
   const canUndo = editorHistory.past.length > 0;
   const canRedo = editorHistory.future.length > 0;
 
@@ -494,6 +528,10 @@ export function App() {
       if (videoUrl) URL.revokeObjectURL(videoUrl);
     };
   }, [videoUrl]);
+
+  useEffect(() => {
+    audioUrlsRef.current = audioUrls;
+  }, [audioUrls]);
 
   useEffect(() => {
     let cancelled = false;
@@ -569,6 +607,7 @@ export function App() {
       exportControllerRef.current?.abort();
       cancelActiveExport();
       importedFontUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      Object.values(audioUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
     };
   }, []);
 
@@ -586,6 +625,14 @@ export function App() {
     selection?.kind === 'clip'
       ? videoClips.find((clip) => clip.id === selection.id)
       : null;
+  const selectedAudioClip =
+    selection?.kind === 'audio'
+      ? audioClips.find((clip) => clip.id === selection.id)
+      : null;
+  const audioSourceMap = useMemo(
+    () => new Map(audioSources.map((source) => [source.id, source])),
+    [audioSources]
+  );
   const clipRanges = useMemo(
     () => getClipTimelineRanges(videoClips, transitions),
     [transitions, videoClips]
@@ -615,17 +662,19 @@ export function App() {
     const maxCueEnd = Math.max(0, ...cues.map((cue) => cue.end));
     const maxOverlayEnd = Math.max(0, ...overlays.map((overlay) => overlay.end));
     const maxEffectEnd = Math.max(0, ...effects.map((effect) => effect.end));
+    const maxAudioEnd = Math.max(0, ...audioClips.map((clip) => clip.end));
     return Math.max(
       mediaTimelineDuration,
       maxCueEnd,
       maxOverlayEnd,
       maxEffectEnd,
+      maxAudioEnd,
       10
     );
-  }, [cues, effects, mediaTimelineDuration, overlays]);
+  }, [audioClips, cues, effects, mediaTimelineDuration, overlays]);
   const outputDimensions = getExportDimensions(dimensions, exportPreset);
   const cueDiagnostics = useMemo(() => getCueDiagnostics(cues), [cues]);
-  const hasExportableLayers = cues.length + overlays.length + effects.length > 0;
+  const hasExportableLayers = cues.length + overlays.length + effects.length + audioClips.length > 0;
   const hasVideoEdit = videoClips.length > 0;
   const selectedClipIndex = selectedClip
     ? videoClips.findIndex((clip) => clip.id === selectedClip.id)
@@ -656,14 +705,27 @@ export function App() {
     effects.length > 0 ||
     videoClips.length > 0 ||
     transitions.length > 0 ||
+    audioSources.length > 0 ||
+    audioClips.length > 0 ||
+    Object.keys(audioFiles).length > 0 ||
     fontAssets.length > 1 ||
     exportUrl !== null;
   const needsVideoRelink = Boolean(restoredVideoName && !videoFile);
+  const needsAudioRelink = audioSources.some((source) => !audioFiles[source.id]);
   const projectVideoLabel = videoFile?.name ?? restoredVideoName ?? mediaMeta?.name ?? '새 프로젝트';
   const shouldWarnBeforeUnload = hasResettableProject || isExporting;
   const selectionSummary = useMemo(
-    () => getTimelineSelectionSummary(selection, clipRanges, cues, overlays, effects),
-    [clipRanges, cues, effects, overlays, selection]
+    () =>
+      getTimelineSelectionSummary(
+        selection,
+        clipRanges,
+        audioClips,
+        audioSourceMap,
+        cues,
+        overlays,
+        effects
+      ),
+    [audioClips, audioSourceMap, clipRanges, cues, effects, overlays, selection]
   );
   const cutRangeStateLabel = hasCutRange
     ? `${formatClock(cutRangeStart ?? 0)} - ${formatClock(cutRangeEnd ?? 0)}`
@@ -848,8 +910,11 @@ export function App() {
         overlays: [],
         effects: [],
         videoClips: [],
-        transitions: []
+        transitions: [],
+        audioSources: [],
+        audioClips: []
       });
+      clearAudioRuntimeState();
     }
     setCurrentTime(0);
     setDuration(0);
@@ -956,6 +1021,136 @@ export function App() {
     );
   }
 
+  function openAudioPicker(kind: AudioSourceKind) {
+    audioImportKindRef.current = kind;
+    audioInputRef.current?.click();
+  }
+
+  async function importAudioFiles(files: File[], kind: AudioSourceKind) {
+    const supportedFiles = files.filter(isAudioFile);
+    if (supportedFiles.length === 0) {
+      setStatus('오디오 파일만 가져올 수 있습니다.');
+      return;
+    }
+
+    const newSources: AudioSourceMeta[] = [];
+    const newClips: AudioClip[] = [];
+    const nextFiles: AudioFileMap = {};
+    const nextUrls: AudioUrlMap = {};
+    const nextWaveforms: Record<string, AudioWaveform> = {};
+    let relinkedCount = 0;
+
+    for (const file of supportedFiles) {
+      const existingSource = audioSources.find(
+        (source) => !audioFiles[source.id] && doesFileMatchAudioSource(file, source)
+      );
+      const duration = await readAudioDuration(file).catch(() => existingSource?.duration ?? 3);
+      const source = existingSource ?? createAudioSourceMeta(file, kind, duration);
+
+      nextFiles[source.id] = file;
+      nextUrls[source.id] = URL.createObjectURL(file);
+      nextWaveforms[source.id] = await generateAudioWaveform(file).catch(() => []);
+
+      if (existingSource) {
+        relinkedCount += 1;
+      } else {
+        const clip = createAudioClip(source, currentTime, Math.max(timelineDuration, currentTime + duration));
+        newSources.push(source);
+        newClips.push(clip);
+      }
+    }
+
+    setAudioFiles((previous) => ({ ...previous, ...nextFiles }));
+    setAudioUrls((previous) => {
+      Object.keys(nextUrls).forEach((sourceId) => {
+        if (previous[sourceId]) URL.revokeObjectURL(previous[sourceId]);
+      });
+      return { ...previous, ...nextUrls };
+    });
+    setAudioWaveforms((previous) => ({ ...previous, ...nextWaveforms }));
+
+    if (newSources.length > 0 || newClips.length > 0) {
+      commitEditor((snapshot) => ({
+        ...snapshot,
+        audioSources: [...snapshot.audioSources, ...newSources],
+        audioClips: [...snapshot.audioClips, ...newClips]
+      }));
+      const firstClip = newClips[0];
+      if (firstClip) {
+        setSelection({ kind: 'audio', id: firstClip.id });
+        setPanelMode('audio');
+        seek(firstClip.start);
+      }
+    } else {
+      setPanelMode('audio');
+    }
+
+    setStatus(
+      [
+        newClips.length ? `오디오 ${newClips.length}개 추가` : '',
+        relinkedCount ? `파일 ${relinkedCount}개 다시 연결` : ''
+      ]
+        .filter(Boolean)
+        .join(' · ') || '오디오 파일을 연결했습니다.'
+    );
+  }
+
+  function updateAudioClip(id: string, patch: Partial<AudioClip>, groupKey?: string) {
+    commitEditor(
+      (snapshot) => ({
+        ...snapshot,
+        audioClips: snapshot.audioClips.map((clip) => {
+          if (clip.id !== id) return clip;
+          const source = snapshot.audioSources.find((item) => item.id === clip.sourceId);
+          return normalizeAudioClip({ ...clip, ...patch }, source);
+        })
+      }),
+      { groupKey }
+    );
+  }
+
+  function moveAudioClip(id: string, start: number, end: number, groupKey?: string) {
+    commitEditor(
+      (snapshot) => ({
+        ...snapshot,
+        audioClips: snapshot.audioClips.map((clip) => {
+          if (clip.id !== id) return clip;
+          const source = snapshot.audioSources.find((item) => item.id === clip.sourceId);
+          const duration = Math.max(MIN_CUE_DURATION, end - start);
+          return normalizeAudioClip(
+            {
+              ...clip,
+              start,
+              end,
+              sourceEnd: clip.sourceStart + duration
+            },
+            source
+          );
+        })
+      }),
+      { groupKey }
+    );
+  }
+
+  function trimAudioClipOnTimeline(
+    id: string,
+    edge: 'start' | 'end',
+    time: number,
+    groupKey?: string
+  ) {
+    commitEditor(
+      (snapshot) => ({
+        ...snapshot,
+        audioClips: snapshot.audioClips.map((clip) => {
+          if (clip.id !== id) return clip;
+          const source = snapshot.audioSources.find((item) => item.id === clip.sourceId);
+          return trimAudioClip(clip, edge, time, source);
+        })
+      }),
+      { groupKey }
+    );
+  }
+
   function commitEditor(
     updater: (snapshot: EditorSnapshot) => EditorSnapshot,
     options: { groupKey?: string } = {}
@@ -1004,6 +1199,16 @@ export function App() {
     setFontAssets([builtinFontAsset]);
   }
 
+  function clearAudioRuntimeState() {
+    Object.values(audioUrlsRef.current).forEach((url) => URL.revokeObjectURL(url));
+    audioUrlsRef.current = {};
+    Object.values(audioPreviewRefs.current).forEach((audio) => audio?.pause());
+    audioPreviewRefs.current = {};
+    setAudioFiles({});
+    setAudioUrls({});
+    setAudioWaveforms({});
+  }
+
   function resetProjectState() {
     resetExportState();
     resetImportedFonts();
@@ -1029,8 +1234,11 @@ export function App() {
       overlays: [],
       effects: [],
       videoClips: [],
-      transitions: []
+      transitions: [],
+      audioSources: [],
+      audioClips: []
     });
+    clearAudioRuntimeState();
     setSelection(null);
     setPanelMode('video');
     setCutRange({ start: null, end: null });
@@ -1195,6 +1403,8 @@ export function App() {
     setPanelMode(
       nextSelection.kind === 'clip'
         ? 'video'
+        : nextSelection.kind === 'audio'
+          ? 'audio'
         : nextSelection.kind === 'cue'
         ? 'captions'
         : nextSelection.kind === 'overlay'
@@ -1404,7 +1614,8 @@ export function App() {
       transitions: result.transitions,
       cues: sortCues(removeTimedRangeItems(snapshot.cues, cutRangeStart, cutRangeEnd)),
       overlays: removeTimedRangeItems(snapshot.overlays, cutRangeStart, cutRangeEnd),
-      effects: removeTimedRangeItems(snapshot.effects, cutRangeStart, cutRangeEnd)
+      effects: removeTimedRangeItems(snapshot.effects, cutRangeStart, cutRangeEnd),
+      audioClips: removeAudioRangeItems(snapshot.audioClips, cutRangeStart, cutRangeEnd)
     }));
     setSelection(null);
     setPanelMode('video');
@@ -1441,7 +1652,10 @@ export function App() {
           return {
             ...nextClip,
             sourceStart,
-            sourceEnd
+            sourceEnd,
+            volume: normalizeAudioVolume(nextClip.volume),
+            fadeIn: normalizeAudioFade(nextClip.fadeIn, sourceEnd - sourceStart),
+            fadeOut: normalizeAudioFade(nextClip.fadeOut, sourceEnd - sourceStart)
           };
         });
 
@@ -1494,8 +1708,47 @@ export function App() {
     }));
   }
 
+  function reorderVideoClip(clipId: string, targetIndex: number) {
+    const result = reorderClipRipple(videoClips, transitions, clipId, targetIndex);
+    if (!result) {
+      setStatus('조각 위치가 이미 그 자리입니다.');
+      return;
+    }
+
+    commitEditor((snapshot) => ({
+      ...snapshot,
+      videoClips: result.clips,
+      transitions: result.transitions
+    }));
+    setSelection({ kind: 'clip', id: result.selectedClipId });
+    setPanelMode('video');
+
+    const nextRange = getClipTimelineRanges(result.clips, result.transitions).find(
+      (range) => range.clip.id === result.selectedClipId
+    );
+    if (nextRange) seek(nextRange.start);
+
+    const removedTransitionCount = Math.max(0, transitions.length - result.transitions.length);
+    setStatus(
+      `조각 ${result.fromIndex + 1}을 ${result.toIndex + 1}번째 위치로 이동했습니다.${
+        removedTransitionCount
+          ? ` 인접하지 않게 된 전환 ${removedTransitionCount}개는 정리했습니다.`
+          : ''
+      }`
+    );
+  }
+
+  function moveSelectedClip(offset: number) {
+    if (!selectedClip) return;
+    reorderVideoClip(selectedClip.id, selectedClipIndex + offset);
+  }
+
   function duplicateSelection() {
     if (selectedClip) {
+      if (panelMode === 'audio') {
+        setStatus('원본 오디오는 영상 조각과 묶여 있어 별도 복제할 수 없습니다.');
+        return;
+      }
       const result = insertDuplicateClipAfter(videoClips, transitions, selectedClip.id);
       if (result) {
         commitEditor((snapshot) => ({
@@ -1550,10 +1803,30 @@ export function App() {
       }));
       setSelection({ kind: 'effect', id: clone.id });
     }
+
+    if (selectedAudioClip) {
+      const clone = {
+        ...selectedAudioClip,
+        id: crypto.randomUUID(),
+        start: selectedAudioClip.start + 0.25,
+        end: selectedAudioClip.end + 0.25
+      };
+      commitEditor((snapshot) => ({
+        ...snapshot,
+        audioClips: [...snapshot.audioClips, clone]
+      }));
+      setSelection({ kind: 'audio', id: clone.id });
+      setPanelMode('audio');
+    }
   }
 
   function deleteSelection() {
     if (selectedClip) {
+      if (panelMode === 'audio') {
+        updateVideoClip(selectedClip.id, { muted: true }, `video-audio:${selectedClip.id}:muted`);
+        setStatus('선택한 원본 오디오를 음소거했습니다.');
+        return;
+      }
       const result = deleteClipRipple(videoClips, transitions, selectedClip.id);
       if (!result) {
         setStatus('마지막 영상 조각은 삭제할 수 없습니다.');
@@ -1599,6 +1872,15 @@ export function App() {
       setStatus('선택한 효과를 삭제했습니다.');
       return;
     }
+    if (selectedAudioClip) {
+      commitEditor((snapshot) => ({
+        ...snapshot,
+        audioClips: snapshot.audioClips.filter((clip) => clip.id !== selectedAudioClip.id)
+      }));
+      setSelection(null);
+      setStatus('선택한 오디오 클립을 삭제했습니다.');
+      return;
+    }
     setSelection(null);
   }
 
@@ -1631,6 +1913,16 @@ export function App() {
         start: currentTime,
         end: currentTime + Math.max(length, MIN_CUE_DURATION)
       });
+    }
+
+    if (selectedAudioClip) {
+      const length = selectedAudioClip.end - selectedAudioClip.start;
+      moveAudioClip(
+        selectedAudioClip.id,
+        currentTime,
+        currentTime + Math.max(length, MIN_CUE_DURATION),
+        `audio-move:${selectedAudioClip.id}`
+      );
     }
   }
 
@@ -1680,8 +1972,11 @@ export function App() {
         overlays: project.overlays ?? [],
         effects: project.effects ?? [],
         videoClips: project.videoClips ?? [],
-        transitions: project.transitions ?? []
+        transitions: project.transitions ?? [],
+        audioSources: project.audioSources ?? [],
+        audioClips: project.audioClips ?? []
       });
+      clearAudioRuntimeState();
       resetExportState();
       if (requiresVideoRelink) {
         if (videoRef.current) {
@@ -1721,6 +2016,8 @@ export function App() {
             ? ({ kind: 'overlay', id: project.overlays[0].id } as const)
             : project.effects[0]
               ? ({ kind: 'effect', id: project.effects[0].id } as const)
+              : project.audioClips?.[0]
+                ? ({ kind: 'audio', id: project.audioClips[0].id } as const)
               : null;
       setSelection(firstSelection);
       setPanelMode(
@@ -1728,6 +2025,8 @@ export function App() {
           ? 'texts'
           : firstSelection?.kind === 'effect'
             ? 'effects'
+            : firstSelection?.kind === 'audio'
+              ? 'audio'
             : firstSelection?.kind === 'clip'
               ? 'video'
               : 'captions'
@@ -1735,7 +2034,9 @@ export function App() {
       setStatus(
         requiresVideoRelink
           ? `프로젝트 불러옴. 원본 영상 "${projectVideoName}"을 다시 연결하세요.`
-          : '프로젝트 불러옴'
+          : project.audioSources?.length
+            ? '프로젝트 불러옴. 오디오 파일은 오디오 패널에서 다시 연결하세요.'
+            : '프로젝트 불러옴'
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : '프로젝트 파일을 읽지 못했습니다.');
@@ -1753,6 +2054,8 @@ export function App() {
       effects,
       videoClips,
       transitions,
+      audioSources,
+      audioClips,
       createdAt: projectCreatedAt,
       updatedAt: now
     };
@@ -1785,9 +2088,10 @@ export function App() {
 	    saveTarget,
 	    jobCues,
 	    jobOverlays,
-	    jobEffects,
+    jobEffects,
     jobClips,
-    jobTransitions
+    jobTransitions,
+    jobAudioClips
   }: {
     jobLabel: string;
 	    doneMessage: string;
@@ -1797,6 +2101,7 @@ export function App() {
     jobEffects: InteractionEffect[];
     jobClips: VideoClip[];
     jobTransitions: ClipTransition[];
+    jobAudioClips: AudioClip[];
   }) {
     if (!videoFile) {
       setStatus('먼저 영상 파일을 선택하세요.');
@@ -1823,7 +2128,14 @@ export function App() {
         hasAudio: detectedAudio,
         fileSize: videoFile.size
       });
-      setExportPreflightNote(formatExportPreflightNote(preflight.messages, preflight.risk));
+      const missingAudioCount = jobAudioClips.filter((clip) => !audioFiles[clip.sourceId]).length;
+      const preflightMessages = [
+        ...preflight.messages,
+        ...(missingAudioCount > 0
+          ? [`재연결되지 않은 오디오 ${missingAudioCount}개는 제외됩니다.`]
+          : [])
+      ];
+      setExportPreflightNote(formatExportPreflightNote(preflightMessages, preflight.risk));
 
       const blob = await exportVideoWithBurnedSubtitles(
         videoFile,
@@ -1837,6 +2149,9 @@ export function App() {
           dimensions,
           sourceDuration: duration,
           hasAudio: preflight.hasAudio !== false,
+          audioSources,
+          audioClips: jobAudioClips,
+          audioFiles,
           fontFiles: fontAssets
             .map((asset) => asset.file)
             .filter((file): file is File => Boolean(file)),
@@ -1934,7 +2249,8 @@ export function App() {
 	      jobOverlays: overlays,
       jobEffects: effects,
       jobClips: videoClips,
-      jobTransitions: transitions
+      jobTransitions: transitions,
+      jobAudioClips: audioClips
     });
   }
 
@@ -1967,7 +2283,8 @@ export function App() {
       jobOverlays: shiftTimelineItemsToClip(overlays, rangeStart, rangeEnd),
       jobEffects: shiftTimelineItemsToClip(effects, rangeStart, rangeEnd),
       jobClips: [selectedClip],
-      jobTransitions: []
+      jobTransitions: [],
+      jobAudioClips: shiftAudioClipsToClip(audioClips, rangeStart, rangeEnd)
     });
   }
 
@@ -2008,6 +2325,7 @@ export function App() {
     } else {
       videoRef.current.pause();
       transitionVideoRef.current?.pause();
+      pauseExternalAudioPreview();
       setIsPlaying(false);
     }
   }
@@ -2021,6 +2339,10 @@ export function App() {
         videoRef.current.currentTime = sourceTime;
       }
       videoRef.current.playbackRate = nextClipRange?.clip.speed ?? 1;
+      videoRef.current.muted = false;
+      videoRef.current.volume = nextClipRange
+        ? getVideoClipPreviewVolume(nextClipRange, time)
+        : 1;
       if (shouldPlay && videoRef.current.paused) {
         void videoRef.current.play();
       }
@@ -2040,6 +2362,38 @@ export function App() {
         void transitionVideoRef.current.play();
       }
     }
+
+    syncExternalAudioPreview(time, shouldPlay);
+  }
+
+  function syncExternalAudioPreview(time: number, shouldPlay = isPlaying) {
+    audioClips.forEach((clip) => {
+      const audio = audioPreviewRefs.current[clip.id];
+      if (!audio) return;
+
+      const active = time >= clip.start && time <= clip.end && Boolean(audioUrls[clip.sourceId]);
+      if (!active || clip.muted) {
+        audio.pause();
+        return;
+      }
+
+      const localTime = clamp(time - clip.start, 0, getAudioClipDuration(clip));
+      const sourceTime = clip.sourceStart + localTime;
+      if (Math.abs(audio.currentTime - sourceTime) > (shouldPlay ? 0.2 : 0.03)) {
+        audio.currentTime = sourceTime;
+      }
+      audio.volume = getAudioClipPreviewVolume(clip, time);
+
+      if (shouldPlay && audio.paused) {
+        void audio.play().catch(() => undefined);
+      } else if (!shouldPlay) {
+        audio.pause();
+      }
+    });
+  }
+
+  function pauseExternalAudioPreview() {
+    Object.values(audioPreviewRefs.current).forEach((audio) => audio?.pause());
   }
 
   useEffect(() => {
@@ -2047,6 +2401,7 @@ export function App() {
       playbackClockRef.current = null;
       videoRef.current?.pause();
       transitionVideoRef.current?.pause();
+      pauseExternalAudioPreview();
       return;
     }
 
@@ -2061,6 +2416,7 @@ export function App() {
         if (nextTime >= timelineDuration) {
           videoRef.current?.pause();
           transitionVideoRef.current?.pause();
+          pauseExternalAudioPreview();
           setIsPlaying(false);
         }
         return nextTime;
@@ -2075,7 +2431,7 @@ export function App() {
 
   useEffect(() => {
     syncPreviewVideo(currentTime);
-  }, [clipRanges, currentTime, transitionPreview]);
+  }, [audioClips, audioUrls, clipRanges, currentTime, isPlaying, transitionPreview]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2088,7 +2444,8 @@ export function App() {
         project.cues.length === 0 &&
         project.overlays.length === 0 &&
         project.effects.length === 0 &&
-        (project.videoClips?.length ?? 0) === 0
+        (project.videoClips?.length ?? 0) === 0 &&
+        (project.audioClips?.length ?? 0) === 0
       ) {
         return;
       }
@@ -2098,8 +2455,11 @@ export function App() {
         overlays: project.overlays,
         effects: project.effects,
         videoClips: project.videoClips ?? [],
-        transitions: project.transitions ?? []
+        transitions: project.transitions ?? [],
+        audioSources: project.audioSources ?? [],
+        audioClips: project.audioClips ?? []
       });
+      clearAudioRuntimeState();
       setProjectCreatedAt(project.createdAt);
       setLastAutosavedAt(project.updatedAt);
       const projectVideoName = project.mediaMeta?.name ?? project.videoName ?? null;
@@ -2114,6 +2474,8 @@ export function App() {
             ? ({ kind: 'overlay', id: project.overlays[0].id } as const)
             : project.effects[0]
               ? ({ kind: 'effect', id: project.effects[0].id } as const)
+              : project.audioClips?.[0]
+                ? ({ kind: 'audio', id: project.audioClips[0].id } as const)
               : null;
       setSelection(firstSelection);
       setPanelMode(
@@ -2121,6 +2483,8 @@ export function App() {
           ? 'texts'
           : firstSelection?.kind === 'effect'
             ? 'effects'
+            : firstSelection?.kind === 'audio'
+              ? 'audio'
             : firstSelection?.kind === 'clip'
               ? 'video'
               : 'captions'
@@ -2174,7 +2538,8 @@ export function App() {
       cues.length === 0 &&
       overlays.length === 0 &&
       effects.length === 0 &&
-      videoClips.length === 0
+      videoClips.length === 0 &&
+      audioClips.length === 0
     ) {
       return;
     }
@@ -2190,6 +2555,8 @@ export function App() {
         effects,
         videoClips,
         transitions,
+        audioSources,
+        audioClips,
         createdAt: projectCreatedAt,
         updatedAt: now
       };
@@ -2202,6 +2569,8 @@ export function App() {
   }, [
     cues,
     effects,
+    audioClips,
+    audioSources,
     overlays,
     projectCreatedAt,
     mediaMeta,
@@ -2236,7 +2605,14 @@ export function App() {
     ) {
       setSelection(null);
     }
-  }, [cues, effects, overlays, selection, videoClips]);
+
+    if (
+      selection?.kind === 'audio' &&
+      !audioClips.some((clip) => clip.id === selection.id)
+    ) {
+      setSelection(null);
+    }
+  }, [audioClips, cues, effects, overlays, selection, videoClips]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -2273,6 +2649,20 @@ export function App() {
           else removeMarkedCutRange();
         }
         return;
+      }
+
+      if (!withCommand && event.altKey && selectedClip) {
+        if (event.key === 'ArrowLeft') {
+          event.preventDefault();
+          moveSelectedClip(-1);
+          return;
+        }
+
+        if (event.key === 'ArrowRight') {
+          event.preventDefault();
+          moveSelectedClip(1);
+          return;
+        }
       }
 
       if (withCommand || event.altKey) return;
@@ -2330,6 +2720,20 @@ export function App() {
         onChange={(event) => {
           const file = event.target.files?.[0];
           if (file) handleSelectedVideoFile(file);
+          event.currentTarget.value = '';
+        }}
+      />
+      <input
+        ref={audioInputRef}
+        type="file"
+        accept="audio/*"
+        multiple
+        hidden
+        onChange={(event) => {
+          const files = [...(event.target.files ?? [])];
+          if (files.length > 0) {
+            void importAudioFiles(files, audioImportKindRef.current);
+          }
           event.currentTarget.value = '';
         }}
       />
@@ -2676,7 +3080,7 @@ export function App() {
                   />
                 )}
                 <div className="overlay-layer">
-                  {(selectedOverlay || selectedEffect) && (
+                  {(selectedCue || selectedOverlay || selectedEffect) && (
                     <span className="preview-safe-frame" aria-hidden="true" />
                   )}
                   {previewGuide?.vertical !== undefined && (
@@ -2695,7 +3099,18 @@ export function App() {
                   )}
                   {previewGuide && <span className="preview-guide-label">{previewGuide.label}</span>}
                   {activeCues.map((cue) => (
-                    <CaptionPreview key={cue.id} cue={cue} />
+                    <CaptionPreview
+                      key={cue.id}
+                      cue={cue}
+                      selected={selection?.kind === 'cue' && selection.id === cue.id}
+                      onSelect={() => {
+                        setSelection({ kind: 'cue', id: cue.id });
+                        setPanelMode('captions');
+                      }}
+                      onTextChange={(text, groupKey) =>
+                        updateCue(cue.id, { text }, groupKey ?? `preview-cue-text:${cue.id}`)
+                      }
+                    />
                   ))}
                   {activeOverlays.map((overlay) => (
                     <TextPreview
@@ -2713,6 +3128,13 @@ export function App() {
                           overlay.id,
                           { scaleX, scaleY },
                           `overlay-scale:${overlay.id}`
+                        )
+                      }
+                      onTextChange={(text, groupKey) =>
+                        updateOverlay(
+                          overlay.id,
+                          { text },
+                          groupKey ?? `preview-overlay-text:${overlay.id}`
                         )
                       }
                     />
@@ -2733,6 +3155,22 @@ export function App() {
                       }
                     />
                   ))}
+                </div>
+                <div className="audio-preview-layer" aria-hidden="true">
+                  {audioClips.map((clip) => {
+                    const url = audioUrls[clip.sourceId];
+                    if (!url) return null;
+                    return (
+                      <audio
+                        key={clip.id}
+                        ref={(node) => {
+                          audioPreviewRefs.current[clip.id] = node;
+                        }}
+                        src={url}
+                        preload="auto"
+                      />
+                    );
+                  })}
                 </div>
               </div>
             ) : (
@@ -2878,10 +3316,13 @@ export function App() {
             </div>
           )}
 
-          <Timeline
-            videoClips={videoClips}
-            transitions={transitions}
-            cues={cues}
+            <Timeline
+              videoClips={videoClips}
+              transitions={transitions}
+              audioSources={audioSources}
+              audioClips={audioClips}
+              audioWaveforms={audioWaveforms}
+              cues={cues}
             overlays={overlays}
             effects={effects}
 	            thumbnails={timelineThumbnails}
@@ -2892,6 +3333,12 @@ export function App() {
             cutRange={cutRange}
             onSeek={seek}
             onTrimClip={trimVideoClip}
+            onReorderClip={reorderVideoClip}
+            onSelectSourceAudio={(clipId) => {
+              setSelection({ kind: 'clip', id: clipId });
+              setPanelMode('audio');
+            }}
+            onMoveAudioClip={moveAudioClip}
             onMoveCue={(id, start, end, groupKey) =>
               updateCue(id, { start, end }, groupKey)
             }
@@ -2930,6 +3377,7 @@ export function App() {
               </a>
             )}
             {needsVideoRelink && <span className="video-link-pill">영상 연결 필요</span>}
+            {needsAudioRelink && <span className="video-link-pill">오디오 연결 필요</span>}
             {lastAutosavedAt && (
               <span className="autosave-pill">
                 자동 저장 {new Date(lastAutosavedAt).toLocaleTimeString()}
@@ -2952,6 +3400,14 @@ export function App() {
             >
               <Film size={17} />
               영상
+            </button>
+            <button
+              type="button"
+              className={panelMode === 'audio' ? 'active' : ''}
+              onClick={() => setPanelMode('audio')}
+            >
+              <Music size={17} />
+              오디오
             </button>
             <button
               type="button"
@@ -2985,6 +3441,8 @@ export function App() {
               onClick={
                 panelMode === 'video'
                   ? splitClipAtPlayhead
+                  : panelMode === 'audio'
+                    ? () => openAudioPicker('music')
                   : panelMode === 'captions'
                   ? addCaption
                   : panelMode === 'texts'
@@ -2993,19 +3451,37 @@ export function App() {
               }
             >
               {panelMode === 'video' ? <Scissors size={17} /> : <Plus size={17} />}
-              {panelMode === 'video' ? '조각 분할' : '추가'}
+              {panelMode === 'video'
+                ? '조각 분할'
+                : panelMode === 'audio'
+                  ? '음악 추가'
+                  : '추가'}
             </button>
             <button type="button" onClick={duplicateSelection} disabled={!selection}>
               <Copy size={17} />
-              {panelMode === 'video' ? '조각 복제' : '복제'}
+              {panelMode === 'video'
+                ? '조각 복제'
+                : panelMode === 'audio'
+                  ? '오디오 복제'
+                  : '복제'}
             </button>
             <button type="button" onClick={moveSelectionToPlayhead} disabled={!selection}>
               <Play size={17} />
-              {panelMode === 'video' ? '조각 시작' : '현재'}
+              {panelMode === 'video'
+                ? '조각 시작'
+                : panelMode === 'audio'
+                  ? '현재 위치'
+                  : '현재'}
             </button>
             <button type="button" onClick={deleteSelection} disabled={!selection}>
               <Trash2 size={17} />
-              {panelMode === 'video' ? '조각 삭제' : '삭제'}
+              {panelMode === 'video'
+                ? '조각 삭제'
+                : panelMode === 'audio'
+                  ? selectedClip
+                    ? '음소거'
+                    : '삭제'
+                  : '삭제'}
             </button>
           </div>
 
@@ -3020,9 +3496,26 @@ export function App() {
               isExporting={isExporting}
               onSelect={(id) => setSelection({ kind: 'clip', id })}
               onSeek={seek}
+              onMoveClip={moveSelectedClip}
               onUpdateClip={updateVideoClip}
               onUpdateTransition={updateTransitionAfterSelected}
               onExportSelectedClip={() => void exportSelectedClipMp4()}
+            />
+          ) : panelMode === 'audio' ? (
+            <AudioPanel
+              sources={audioSources}
+              clips={audioClips}
+              sourceFiles={audioFiles}
+              videoRanges={clipRanges}
+              selectedAudioClip={selectedAudioClip}
+              selectedVideoClip={selectedClip}
+              onImportMusic={() => openAudioPicker('music')}
+              onImportEffect={() => openAudioPicker('effect')}
+              onSelectAudio={(id) => setSelection({ kind: 'audio', id })}
+              onSelectVideoAudio={(id) => setSelection({ kind: 'clip', id })}
+              onSeek={seek}
+              onUpdateAudioClip={updateAudioClip}
+              onUpdateVideoClip={updateVideoClip}
             />
           ) : panelMode === 'captions' ? (
             <CaptionPanel
@@ -3270,10 +3763,107 @@ function FontManager({
   );
 }
 
-function CaptionPreview({ cue }: { cue: CaptionCue }) {
+function PreviewInlineTextEditor({
+  value,
+  ariaLabel,
+  onChange,
+  onCommit,
+  onCancel
+}: {
+  value: string;
+  ariaLabel: string;
+  onChange: (value: string) => void;
+  onCommit: () => void;
+  onCancel: () => void;
+}) {
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+
+    resizePreviewTextarea(input);
+    input.focus();
+    input.select();
+  }, []);
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+
+    resizePreviewTextarea(input);
+  }, [value]);
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    event.stopPropagation();
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      onCancel();
+      return;
+    }
+
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      event.currentTarget.blur();
+    }
+  }
+
+  return (
+    <textarea
+      ref={inputRef}
+      className="preview-inline-input"
+      aria-label={ariaLabel}
+      value={value}
+      rows={1}
+      spellCheck={false}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onPointerMove={(event) => event.stopPropagation()}
+      onKeyDown={handleKeyDown}
+      onChange={(event) => {
+        resizePreviewTextarea(event.currentTarget);
+        onChange(event.currentTarget.value);
+      }}
+      onBlur={onCommit}
+    />
+  );
+}
+
+function resizePreviewTextarea(input: HTMLTextAreaElement) {
+  input.style.height = 'auto';
+  input.style.height = `${clamp(input.scrollHeight, 34, 180)}px`;
+}
+
+function CaptionPreview({
+  cue,
+  selected,
+  onSelect,
+  onTextChange
+}: {
+  cue: CaptionCue;
+  selected: boolean;
+  onSelect: () => void;
+  onTextChange: (text: string, groupKey?: string) => void;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const initialTextRef = useRef(cue.text);
+
+  function startEditing() {
+    onSelect();
+    initialTextRef.current = cue.text;
+    setIsEditing(true);
+  }
+
   return (
     <div
-      className={`caption-preview caption-${cue.position}`}
+      className={`caption-preview caption-${cue.position} ${selected ? 'selected' : ''} ${
+        isEditing ? 'editing' : ''
+      } ${cue.text.trim() ? '' : 'is-empty'}`}
+      role="button"
+      tabIndex={0}
+      aria-label="미리보기 자막"
       style={{
         fontFamily: cue.style.fontFamily,
         fontWeight: cue.style.fontWeight ?? defaultCaptionStyle.fontWeight,
@@ -3285,8 +3875,39 @@ function CaptionPreview({ cue }: { cue: CaptionCue }) {
           ? `0 2px 8px ${cue.style.outlineColor}, 0 0 ${cue.style.outlineWidth}px ${cue.style.outlineColor}`
           : `0 0 ${cue.style.outlineWidth}px ${cue.style.outlineColor}`
       }}
+      onClick={(event) => {
+        event.stopPropagation();
+        onSelect();
+      }}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        startEditing();
+      }}
+      onKeyDown={(event) => {
+        if (isEditing) return;
+        if (event.key === 'Enter' || event.key === 'F2') {
+          event.preventDefault();
+          startEditing();
+        }
+      }}
     >
-      {cue.text}
+      {isEditing ? (
+        <PreviewInlineTextEditor
+          value={cue.text}
+          ariaLabel="자막 내용 직접 편집"
+          onChange={(text) => onTextChange(text, `preview-cue-text:${cue.id}`)}
+          onCommit={() => setIsEditing(false)}
+          onCancel={() => {
+            onTextChange(initialTextRef.current, `preview-cue-text:${cue.id}`);
+            setIsEditing(false);
+          }}
+        />
+      ) : (
+        <>
+          {cue.text || '자막 입력'}
+          {selected && <span className="preview-edit-hint">더블클릭 편집</span>}
+        </>
+      )}
     </div>
   );
 }
@@ -3318,7 +3939,8 @@ function TextPreview({
   onSelect,
   onMove,
   onMoveEnd,
-  onResize
+  onResize,
+  onTextChange
 }: {
   overlay: TextOverlay;
   selected: boolean;
@@ -3326,7 +3948,10 @@ function TextPreview({
   onMove: (x: number, y: number) => void;
   onMoveEnd: () => void;
   onResize: (scaleX: number, scaleY: number) => void;
+  onTextChange: (text: string, groupKey?: string) => void;
 }) {
+  const [isEditing, setIsEditing] = useState(false);
+  const initialTextRef = useRef(overlay.text);
   const dragStartRef = useRef<{
     bounds: { left: number; top: number; width: number; height: number };
     offsetX: number;
@@ -3348,7 +3973,13 @@ function TextPreview({
   const anchorTranslateX = align === 'left' ? '0%' : align === 'right' ? '-100%' : '-50%';
   const transformOriginX = align === 'left' ? 'left' : align === 'right' ? 'right' : 'center';
 
-  function startMove(event: ReactPointerEvent<HTMLButtonElement>) {
+  function startEditing() {
+    onSelect();
+    initialTextRef.current = overlay.text;
+    setIsEditing(true);
+  }
+
+  function startMove(event: ReactPointerEvent<HTMLDivElement>) {
     const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
     if (!bounds) return;
 
@@ -3366,7 +3997,7 @@ function TextPreview({
     };
   }
 
-  function moveToPointer(event: ReactPointerEvent<HTMLButtonElement>) {
+  function moveToPointer(event: ReactPointerEvent<HTMLDivElement>) {
     const start = dragStartRef.current;
     if (!start) return;
 
@@ -3415,9 +4046,13 @@ function TextPreview({
   }
 
   return (
-    <button
-      type="button"
-      className={`text-preview ${selected ? 'selected' : ''}`}
+    <div
+      className={`text-preview ${selected ? 'selected' : ''} ${isEditing ? 'editing' : ''} ${
+        overlay.text.trim() ? '' : 'is-empty'
+      }`}
+      role="button"
+      tabIndex={0}
+      aria-label="미리보기 텍스트"
       style={{
         left: `${overlay.x}%`,
         top: `${overlay.y}%`,
@@ -3440,10 +4075,23 @@ function TextPreview({
           : `0 0 ${overlay.outlineWidth}px ${overlay.outlineColor}`
       } as CSSProperties}
       onClick={(event) => {
+        if (isTextEditingElement(event.target)) return;
         event.stopPropagation();
         onSelect();
       }}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        startEditing();
+      }}
+      onKeyDown={(event) => {
+        if (isEditing) return;
+        if (event.key === 'Enter' || event.key === 'F2') {
+          event.preventDefault();
+          startEditing();
+        }
+      }}
       onPointerDown={(event) => {
+        if (isEditing || isTextEditingElement(event.target)) return;
         event.stopPropagation();
         onSelect();
         event.currentTarget.setPointerCapture(event.pointerId);
@@ -3468,8 +4116,24 @@ function TextPreview({
         onMoveEnd();
       }}
     >
-      {overlay.text}
-      {selected && (
+      {isEditing ? (
+        <PreviewInlineTextEditor
+          value={overlay.text}
+          ariaLabel="텍스트 내용 직접 편집"
+          onChange={(text) => onTextChange(text, `preview-overlay-text:${overlay.id}`)}
+          onCommit={() => setIsEditing(false)}
+          onCancel={() => {
+            onTextChange(initialTextRef.current, `preview-overlay-text:${overlay.id}`);
+            setIsEditing(false);
+          }}
+        />
+      ) : (
+        <>
+          {overlay.text || '텍스트 입력'}
+          {selected && <span className="preview-edit-hint">더블클릭 편집</span>}
+        </>
+      )}
+      {selected && !isEditing && (
         <>
           {textResizeHandles.map((handle) => (
             <span
@@ -3514,7 +4178,7 @@ function TextPreview({
           ))}
         </>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -3799,6 +4463,15 @@ type TimelineDragState =
       hasMoved: boolean;
     }
   | {
+      kind: 'clip-reorder';
+      pointerId: number;
+      clipId: string;
+      startX: number;
+      originalIndex: number;
+      targetIndex: number;
+      hasMoved: boolean;
+    }
+  | {
       kind: 'timed-item';
       pointerId: number;
       itemKind: TimelineItemKind;
@@ -3843,6 +4516,9 @@ const TIMELINE_EDGE_PADDING = 18;
 function Timeline({
   videoClips,
   transitions,
+  audioSources,
+  audioClips,
+  audioWaveforms,
   cues,
   overlays,
   effects,
@@ -3854,6 +4530,9 @@ function Timeline({
   cutRange,
   onSeek,
   onTrimClip,
+  onReorderClip,
+  onSelectSourceAudio,
+  onMoveAudioClip,
   onMoveCue,
   onMoveOverlay,
   onMoveEffect,
@@ -3862,6 +4541,9 @@ function Timeline({
 }: {
   videoClips: VideoClip[];
   transitions: ClipTransition[];
+  audioSources: AudioSourceMeta[];
+  audioClips: AudioClip[];
+  audioWaveforms: Record<string, AudioWaveform>;
   cues: CaptionCue[];
   overlays: TextOverlay[];
   effects: InteractionEffect[];
@@ -3878,6 +4560,9 @@ function Timeline({
     sourceTime: number,
     groupKey?: string
   ) => void;
+  onReorderClip: (clipId: string, targetIndex: number) => void;
+  onSelectSourceAudio: (clipId: string) => void;
+  onMoveAudioClip: (id: string, start: number, end: number, groupKey?: string) => void;
   onMoveCue: (id: string, start: number, end: number, groupKey?: string) => void;
   onMoveOverlay: (id: string, start: number, end: number, groupKey?: string) => void;
   onMoveEffect: (id: string, start: number, end: number, groupKey?: string) => void;
@@ -3910,11 +4595,17 @@ function Timeline({
   const [clipTrimPreview, setClipTrimPreview] = useState<ClipTrimPreviewState | null>(null);
   const [trackHeights, setTrackHeights] = useState<TimelineTrackHeights>({
     video: TIMELINE_VIDEO_TRACK_HEIGHT,
+    audio: getTimelineTrackHeight(2),
     cue: getTimelineTrackHeight(1),
     overlay: getTimelineTrackHeight(1),
     effect: getTimelineTrackHeight(1)
   });
   const [dragGuide, setDragGuide] = useState<{ time: number; label: string } | null>(null);
+  const [clipReorderGuide, setClipReorderGuide] = useState<{
+    x: number;
+    label: string;
+  } | null>(null);
+  const [reorderingClipId, setReorderingClipId] = useState<string | null>(null);
 
   const safeDuration = Math.max(duration, MIN_CUE_DURATION);
   const timelineWidth = getTimelineContentWidth(
@@ -3935,6 +4626,10 @@ function Timeline({
   const timelineX = (time: number) => TIMELINE_EDGE_PADDING + timeToTimelineX(time, pxPerSecond);
   const playheadLeft = `${timelineX(currentTime)}px`;
   const clipRanges = getClipTimelineRanges(videoClips, transitions);
+  const timelineAudioSourceMap = useMemo(
+    () => new Map(audioSources.map((source) => [source.id, source])),
+    [audioSources]
+  );
   const normalizedTransitions = normalizeTransitionsForClips(videoClips, transitions);
   const hasCutSelection = cutRange.start !== null && cutRange.end !== null;
   const cutStart = hasCutSelection ? Math.min(cutRange.start ?? 0, cutRange.end ?? 0) : null;
@@ -3942,6 +4637,10 @@ function Timeline({
   const cueLayout = useMemo(
     () => layoutTimelineItems(cues, (cue) => ({ start: cue.start, end: cue.end })),
     [cues]
+  );
+  const audioLayout = useMemo(
+    () => layoutTimelineItems(audioClips, (clip) => ({ start: clip.start, end: clip.end })),
+    [audioClips]
   );
   const overlayLayout = useMemo(
     () => layoutTimelineItems(overlays, (overlay) => ({ start: overlay.start, end: overlay.end })),
@@ -3952,22 +4651,26 @@ function Timeline({
     [effects]
   );
   const cueTrackBaseHeight = getTimelineTrackHeight(cueLayout.laneCount);
+  const audioTrackBaseHeight = getTimelineTrackHeight(Math.max(2, audioLayout.laneCount + 1));
   const overlayTrackBaseHeight = getTimelineTrackHeight(overlayLayout.laneCount);
   const effectTrackBaseHeight = getTimelineTrackHeight(effectLayout.laneCount);
   const trackDefaultHeights: TimelineTrackHeights = {
     video: TIMELINE_VIDEO_TRACK_HEIGHT,
+    audio: audioTrackBaseHeight,
     cue: cueTrackBaseHeight,
     overlay: overlayTrackBaseHeight,
     effect: effectTrackBaseHeight
   };
   const trackMinimumHeights: TimelineTrackHeights = {
     video: TIMELINE_VIDEO_TRACK_MIN_HEIGHT,
+    audio: audioTrackBaseHeight,
     cue: cueTrackBaseHeight,
     overlay: overlayTrackBaseHeight,
     effect: effectTrackBaseHeight
   };
   const trackMaximumHeights: TimelineTrackHeights = {
     video: TIMELINE_VIDEO_TRACK_MAX_HEIGHT,
+    audio: Math.max(audioTrackBaseHeight, TIMELINE_TIMED_TRACK_MAX_HEIGHT),
     cue: Math.max(cueTrackBaseHeight, TIMELINE_TIMED_TRACK_MAX_HEIGHT),
     overlay: Math.max(overlayTrackBaseHeight, TIMELINE_TIMED_TRACK_MAX_HEIGHT),
     effect: Math.max(effectTrackBaseHeight, TIMELINE_TIMED_TRACK_MAX_HEIGHT)
@@ -3982,6 +4685,11 @@ function Timeline({
     trackMinimumHeights.cue,
     trackMaximumHeights.cue
   );
+  const audioTrackHeight = clamp(
+    Math.max(trackHeights.audio, audioTrackBaseHeight),
+    trackMinimumHeights.audio,
+    trackMaximumHeights.audio
+  );
   const overlayTrackHeight = clamp(
     Math.max(trackHeights.overlay, overlayTrackBaseHeight),
     trackMinimumHeights.overlay,
@@ -3994,17 +4702,26 @@ function Timeline({
   );
   const resolvedTrackHeights: TimelineTrackHeights = {
     video: videoTrackHeight,
+    audio: audioTrackHeight,
     cue: cueTrackHeight,
     overlay: overlayTrackHeight,
     effect: effectTrackHeight
   };
-  const gridTemplateRows = `${TIMELINE_RULER_HEIGHT}px ${videoTrackHeight}px ${cueTrackHeight}px ${overlayTrackHeight}px ${effectTrackHeight}px`;
+  const gridTemplateRows = `${TIMELINE_RULER_HEIGHT}px ${videoTrackHeight}px ${audioTrackHeight}px ${cueTrackHeight}px ${overlayTrackHeight}px ${effectTrackHeight}px`;
   const videoItemLaneHeight = Math.max(44, videoTrackHeight - 8);
   const videoClipMetrics = getVideoClipMetrics(videoItemLaneHeight);
   const viewportThumbWidth = timelineWidth > 0 ? clamp((viewportWidth / timelineWidth) * 100, 2, 100) : 100;
   const viewportThumbLeft = timelineWidth > 0 ? clamp((scrollLeft / timelineWidth) * 100, 0, 100) : 0;
   const zoomPercent = Math.round((pxPerSecond / TIMELINE_DEFAULT_PX_PER_SECOND) * 100);
-  const selectedSummary = getTimelineSelectionSummary(selection, clipRanges, cues, overlays, effects);
+  const selectedSummary = getTimelineSelectionSummary(
+    selection,
+    clipRanges,
+    audioClips,
+    timelineAudioSourceMap,
+    cues,
+    overlays,
+    effects
+  );
   const timelineCursorClass =
     tool === 'pan' || isSpacePanning ? 'timeline-scroll-pan-mode' : '';
 
@@ -4016,6 +4733,7 @@ function Timeline({
       cutRange.start,
       cutRange.end,
       ...clipRanges.flatMap((range) => [range.start, range.end]),
+      ...audioClips.flatMap((clip) => [clip.start, clip.end]),
       ...cues.flatMap((cue) => [cue.start, cue.end]),
       ...overlays.flatMap((overlay) => [overlay.start, overlay.end]),
       ...effects.flatMap((effect) => [effect.start, effect.end])
@@ -4028,7 +4746,7 @@ function Timeline({
           .map((point) => Number(clamp(point, 0, safeDuration).toFixed(3)))
       )
     ).sort((a, b) => a - b);
-  }, [clipRanges, cues, currentTime, cutRange.end, cutRange.start, effects, overlays, safeDuration]);
+  }, [audioClips, clipRanges, cues, currentTime, cutRange.end, cutRange.start, effects, overlays, safeDuration]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -4410,6 +5128,99 @@ function Timeline({
     setDragGuide(null);
   }
 
+  function getClipReorderTarget(clientX: number, clipId: string) {
+    const time = timeFromClientX(clientX);
+    const movingIndex = clipRanges.findIndex((range) => range.clip.id === clipId);
+    if (movingIndex < 0) return null;
+
+    const otherRanges = clipRanges.filter((range) => range.clip.id !== clipId);
+    const targetIndex = clamp(
+      otherRanges.filter((range) => time >= range.start + range.outputDuration / 2).length,
+      0,
+      videoClips.length - 1
+    );
+    const guideX =
+      targetIndex <= 0
+        ? timelineX(0)
+        : targetIndex >= otherRanges.length
+          ? timelineX(safeDuration)
+          : timelineX(otherRanges[targetIndex].start);
+
+    return {
+      targetIndex,
+      x: guideX,
+      label: `${targetIndex + 1}번째 위치`
+    };
+  }
+
+  function beginClipReorder(
+    event: ReactPointerEvent<HTMLButtonElement>,
+    range: (typeof clipRanges)[number]
+  ) {
+    if (event.button !== 0 || tool === 'pan' || isSpacePanning) return;
+
+    event.stopPropagation();
+    onSelect({ kind: 'clip', id: range.clip.id });
+    dragRef.current = {
+      kind: 'clip-reorder',
+      pointerId: event.pointerId,
+      clipId: range.clip.id,
+      startX: event.clientX,
+      originalIndex: range.index,
+      targetIndex: range.index,
+      hasMoved: false
+    };
+    setReorderingClipId(range.clip.id);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveClipReorder(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.kind !== 'clip-reorder' || drag.pointerId !== event.pointerId) return;
+
+    const distance = Math.abs(event.clientX - drag.startX);
+    if (distance < 6 && !drag.hasMoved) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    drag.hasMoved = true;
+
+    const target = getClipReorderTarget(event.clientX, drag.clipId);
+    if (!target) return;
+
+    drag.targetIndex = target.targetIndex;
+    setClipReorderGuide({
+      x: target.x,
+      label: target.label
+    });
+  }
+
+  function endClipReorder(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.kind !== 'clip-reorder' || drag.pointerId !== event.pointerId) return;
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (drag.hasMoved) {
+      event.preventDefault();
+      event.stopPropagation();
+      itemClickSuppressRef.current = true;
+      window.setTimeout(() => {
+        itemClickSuppressRef.current = false;
+      }, 0);
+
+      if (drag.targetIndex !== drag.originalIndex) {
+        onReorderClip(drag.clipId, drag.targetIndex);
+      }
+    }
+
+    dragRef.current = null;
+    setClipReorderGuide(null);
+    setReorderingClipId(null);
+  }
+
   function startTimedItemDrag<T extends { id: string; start: number; end: number }>(
     event: ReactPointerEvent<HTMLButtonElement>,
     itemKind: TimelineItemKind,
@@ -4476,7 +5287,9 @@ function Timeline({
     end: number,
     groupKey?: string
   ) {
-    if (itemKind === 'cue') {
+    if (itemKind === 'audio') {
+      onMoveAudioClip(id, start, end, groupKey);
+    } else if (itemKind === 'cue') {
       onMoveCue(id, start, end, groupKey);
     } else if (itemKind === 'overlay') {
       onMoveOverlay(id, start, end, groupKey);
@@ -4736,6 +5549,17 @@ function Timeline({
             onResetHeight={resetTrackHeight}
           />
           <TimelineTrackHeader
+            track="audio"
+            label="오디오"
+            count={videoClips.length + audioClips.length}
+            detail={`${Math.max(1, audioLayout.laneCount + 1)}줄 레이어`}
+            resizing={resizingTrack === 'audio'}
+            onResizeStart={beginTrackResize}
+            onResizeMove={updateTrackResize}
+            onResizeEnd={endTrackResize}
+            onResetHeight={resetTrackHeight}
+          />
+          <TimelineTrackHeader
             track="cue"
             label="자막"
             count={cues.length}
@@ -4832,6 +5656,14 @@ function Timeline({
                 <span>{dragGuide.label}</span>
               </div>
             )}
+            {clipReorderGuide && (
+              <div
+                className="clip-reorder-guide"
+                style={{ left: `${clipReorderGuide.x}px` }}
+              >
+                <span>{clipReorderGuide.label}</span>
+              </div>
+            )}
             <div
               className="playhead"
               style={{ left: playheadLeft }}
@@ -4893,7 +5725,9 @@ function Timeline({
 	                        : ''
 	                    } ${
 	                      isCompactTimelineItem(range.start, range.end, pxPerSecond) ? 'compact' : ''
-	                    } ${activeTrim ? `is-trimming is-trimming-${activeTrim.edge}` : ''}`}
+	                    } ${activeTrim ? `is-trimming is-trimming-${activeTrim.edge}` : ''} ${
+                        reorderingClipId === range.clip.id ? 'is-reordering' : ''
+                      }`}
                     style={
                       {
                         ...timelineItemStyle(
@@ -4913,8 +5747,13 @@ function Timeline({
                     }
                     title={title}
                     aria-label={title}
+                    onPointerDown={(event) => beginClipReorder(event, range)}
+                    onPointerMove={moveClipReorder}
+                    onPointerUp={endClipReorder}
+                    onPointerCancel={endClipReorder}
                     onClick={(event) => {
                       event.stopPropagation();
+                      if (itemClickSuppressRef.current) return;
                       onSelect({ kind: 'clip', id: range.clip.id });
                       onSeek(range.start);
                     }}
@@ -5028,6 +5867,121 @@ function Timeline({
                   >
                     {label}
                   </span>
+                );
+              })}
+            </TimelineLane>
+            <TimelineLane
+              track="audio"
+              height={audioTrackHeight}
+              className="audio-lane"
+              resizing={resizingTrack === 'audio'}
+              onResizeStart={beginTrackResize}
+              onResizeMove={updateTrackResize}
+              onResizeEnd={endTrackResize}
+              onResetHeight={resetTrackHeight}
+            >
+              {clipRanges.map((range) => {
+                if (!isRangeVisible(range.start, range.end)) return null;
+                const volume = normalizeAudioVolume(range.clip.volume);
+                const title = timelineClipTitle(
+                  '원본 오디오',
+                  `조각 ${range.index + 1} · ${Math.round(volume * 100)}%`,
+                  range.start,
+                  range.end
+                );
+
+                return (
+                  <button
+                    type="button"
+                    key={`source-audio-${range.clip.id}`}
+                    className={`timeline-item audio-item source-audio-item ${
+                      selection?.kind === 'clip' && selection.id === range.clip.id ? 'selected' : ''
+                    } ${isCompactTimelineItem(range.start, range.end, pxPerSecond) ? 'compact' : ''}`}
+                    style={timelineItemStyle(
+                      range.start,
+                      range.end,
+                      pxPerSecond,
+                      0,
+                      TIMELINE_ITEM_LANE_HEIGHT,
+                      TIMELINE_ITEM_TOP_PADDING,
+                      TIMELINE_MIN_ITEM_WIDTH,
+                      TIMELINE_EDGE_PADDING
+                    )}
+                    title={title}
+                    aria-label={title}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onSelectSourceAudio(range.clip.id);
+                      onSeek(range.start);
+                    }}
+                  >
+                    <span className="clip-icon">{range.clip.muted ? 'M' : 'A'}</span>
+                    <span className="clip-title">원본 오디오 {range.index + 1}</span>
+                    <span className="clip-meta">{Math.round(volume * 100)}%</span>
+                  </button>
+                );
+              })}
+              {audioLayout.layouts.map((layout) => {
+                const clip = layout.item;
+                if (!isRangeVisible(clip.start, clip.end)) return null;
+                const source = timelineAudioSourceMap.get(clip.sourceId);
+                const label = clip.label || source?.name || '오디오';
+                const title = timelineClipTitle('오디오', label, clip.start, clip.end);
+                const waveform = audioWaveforms[clip.sourceId] ?? [];
+
+                return (
+                  <button
+                    type="button"
+                    key={clip.id}
+                    className={`timeline-item audio-item external-audio-item ${
+                      selection?.kind === 'audio' && selection.id === clip.id ? 'selected' : ''
+                    } ${isCompactTimelineItem(clip.start, clip.end, pxPerSecond) ? 'compact' : ''}`}
+                    style={timelineItemStyle(
+                      clip.start,
+                      clip.end,
+                      pxPerSecond,
+                      layout.lane + 1,
+                      TIMELINE_ITEM_LANE_HEIGHT,
+                      TIMELINE_ITEM_TOP_PADDING,
+                      TIMELINE_MIN_ITEM_WIDTH,
+                      TIMELINE_EDGE_PADDING
+                    )}
+                    title={title}
+                    aria-label={title}
+                    onPointerDown={(event) => startTimedItemDrag(event, 'audio', clip)}
+                    onPointerMove={moveTimedItem}
+                    onPointerUp={endTimedItemDrag}
+                    onPointerCancel={endTimedItemDrag}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (itemClickSuppressRef.current) return;
+                      onSelect({ kind: 'audio', id: clip.id });
+                      onSeek(clip.start);
+                    }}
+                  >
+                    <span
+                      className="timed-trim-handle timed-trim-start"
+                      aria-hidden="true"
+                      onPointerDown={(event) => startTimedItemTrim(event, 'audio', 'start', clip)}
+                      onPointerMove={trimTimedItem}
+                      onPointerUp={endTimedItemTrim}
+                      onPointerCancel={endTimedItemTrim}
+                    />
+                    <span className="clip-icon">{source?.kind === 'effect' ? 'SFX' : 'BGM'}</span>
+                    <span className="clip-title">{label}</span>
+                    <span className="clip-meta">{Math.round(clip.volume * 100)}%</span>
+                    <span className="audio-waveform" aria-hidden="true">
+                      {renderAudioWaveformBars(waveform)}
+                    </span>
+                    <span
+                      className="timed-trim-handle timed-trim-end"
+                      aria-hidden="true"
+                      onPointerDown={(event) => startTimedItemTrim(event, 'audio', 'end', clip)}
+                      onPointerMove={trimTimedItem}
+                      onPointerUp={endTimedItemTrim}
+                      onPointerCancel={endTimedItemTrim}
+                    />
+                  </button>
                 );
               })}
             </TimelineLane>
@@ -5256,6 +6210,7 @@ function TimelineTrackHeader({
 function getTimelineTrackCode(track: TimelineTrackKind) {
   const codes: Record<TimelineTrackKind, string> = {
     video: 'V1',
+    audio: 'A1',
     cue: 'CC',
     overlay: 'T',
     effect: 'FX'
@@ -5317,6 +6272,7 @@ function VideoPanel({
   isExporting,
   onSelect,
   onSeek,
+  onMoveClip,
   onUpdateClip,
   onUpdateTransition,
   onExportSelectedClip
@@ -5330,6 +6286,7 @@ function VideoPanel({
   isExporting: boolean;
   onSelect: (id: string) => void;
   onSeek: (time: number) => void;
+  onMoveClip: (offset: number) => void;
   onUpdateClip: (id: string, patch: Partial<VideoClip>, groupKey?: string) => void;
   onUpdateTransition: (
     kind: ClipTransitionKind | 'none',
@@ -5343,6 +6300,12 @@ function VideoPanel({
   const canTransitionOut =
     Boolean(selectedClip) &&
     clips.findIndex((clip) => clip.id === selectedClip?.id) < clips.length - 1;
+  const selectedClipIndex = selectedClip
+    ? clips.findIndex((clip) => clip.id === selectedClip.id)
+    : -1;
+  const canMoveEarlier = selectedClipIndex > 0;
+  const canMoveLater =
+    selectedClipIndex >= 0 && selectedClipIndex < clips.length - 1;
 
   return (
     <div className="panel-body video-panel-body">
@@ -5495,6 +6458,34 @@ function VideoPanel({
             </div>
           )}
 
+          <div className="clip-order-card">
+            <div>
+              <strong>조각 순서</strong>
+              <span>최종 영상에서 이어 붙는 위치를 변경</span>
+            </div>
+            <div className="clip-order-actions">
+              <button
+                type="button"
+                onClick={() => onMoveClip(-1)}
+                disabled={!canMoveEarlier}
+                title="Alt + ←"
+              >
+                <ArrowLeft size={15} />
+                앞쪽
+              </button>
+              <button
+                type="button"
+                onClick={() => onMoveClip(1)}
+                disabled={!canMoveLater}
+                title="Alt + →"
+              >
+                뒤쪽
+                <ArrowRight size={15} />
+              </button>
+            </div>
+            <small>타임라인의 영상 조각을 드래그해도 순서를 바꿀 수 있습니다.</small>
+          </div>
+
           <div className="clip-export-card">
             <strong>선택 조각 MP4 내보내기</strong>
             <span>선택한 조각만 별도 MP4로 생성</span>
@@ -5542,6 +6533,293 @@ function VideoPanel({
         </div>
       )}
     </div>
+  );
+}
+
+function AudioPanel({
+  sources,
+  clips,
+  sourceFiles,
+  videoRanges,
+  selectedAudioClip,
+  selectedVideoClip,
+  onImportMusic,
+  onImportEffect,
+  onSelectAudio,
+  onSelectVideoAudio,
+  onSeek,
+  onUpdateAudioClip,
+  onUpdateVideoClip
+}: {
+  sources: AudioSourceMeta[];
+  clips: AudioClip[];
+  sourceFiles: AudioFileMap;
+  videoRanges: ReturnType<typeof getClipTimelineRanges>;
+  selectedAudioClip: AudioClip | null | undefined;
+  selectedVideoClip: VideoClip | null | undefined;
+  onImportMusic: () => void;
+  onImportEffect: () => void;
+  onSelectAudio: (id: string) => void;
+  onSelectVideoAudio: (id: string) => void;
+  onSeek: (time: number) => void;
+  onUpdateAudioClip: (id: string, patch: Partial<AudioClip>, groupKey?: string) => void;
+  onUpdateVideoClip: (id: string, patch: Partial<VideoClip>, groupKey?: string) => void;
+}) {
+  const sourceMap = new Map(sources.map((source) => [source.id, source]));
+  const selectedSource = selectedAudioClip ? sourceMap.get(selectedAudioClip.sourceId) : null;
+  const selectedVideoRange = selectedVideoClip
+    ? videoRanges.find((range) => range.clip.id === selectedVideoClip.id)
+    : null;
+  const missingCount = sources.filter((source) => !sourceFiles[source.id]).length;
+
+  return (
+    <div className="panel-body audio-panel-body">
+      <div className="clip-concept-card">
+        <strong>오디오 트랙</strong>
+        <span>원본 소리, 배경음악, 효과음을 볼륨과 페이드 중심으로 조절합니다.</span>
+      </div>
+
+      <div className="audio-import-actions">
+        <button type="button" onClick={onImportMusic}>
+          <Music size={16} />
+          음악 추가
+        </button>
+        <button type="button" onClick={onImportEffect}>
+          <Volume2 size={16} />
+          효과음 추가
+        </button>
+      </div>
+
+      {missingCount > 0 && (
+        <div className="audio-relink-note">
+          <strong>오디오 파일 {missingCount}개 재연결 필요</strong>
+          <span>프로젝트에는 정보만 저장됩니다. 같은 파일을 다시 가져오면 자동 연결됩니다.</span>
+        </div>
+      )}
+
+      <div className="item-list video-clip-list">
+        {videoRanges.length === 0 && clips.length === 0 && (
+          <p className="empty-copy">오디오 트랙 없음</p>
+        )}
+        {videoRanges.map((range) => (
+          <button
+            type="button"
+            key={`video-audio-${range.clip.id}`}
+            className={
+              selectedVideoClip?.id === range.clip.id
+                ? 'item-card clip-card active'
+                : 'item-card clip-card'
+            }
+            onClick={() => {
+              onSelectVideoAudio(range.clip.id);
+              onSeek(range.start);
+            }}
+          >
+            <span className="clip-card-index">{range.index + 1}</span>
+            <div className="clip-card-main">
+              <strong>원본 오디오 {String(range.index + 1).padStart(2, '0')}</strong>
+              <small>
+                {formatClock(range.start)} - {formatClock(range.end)}
+              </small>
+            </div>
+            <div className="clip-card-badges">
+              <span>{Math.round(normalizeAudioVolume(range.clip.volume) * 100)}%</span>
+              {range.clip.muted && <span className="clip-badge-muted">Mute</span>}
+            </div>
+          </button>
+        ))}
+        {clips.map((clip, index) => {
+          const source = sourceMap.get(clip.sourceId);
+          const isMissing = !sourceFiles[clip.sourceId];
+
+          return (
+            <button
+              type="button"
+              key={clip.id}
+              className={
+                selectedAudioClip?.id === clip.id
+                  ? 'item-card clip-card audio-card active'
+                  : 'item-card clip-card audio-card'
+              }
+              onClick={() => {
+                onSelectAudio(clip.id);
+                onSeek(clip.start);
+              }}
+            >
+              <span className="clip-card-index">{source?.kind === 'effect' ? 'S' : 'M'}</span>
+              <div className="clip-card-main">
+                <strong>{clip.label || `오디오 ${index + 1}`}</strong>
+                <small>
+                  {formatClock(clip.start)} - {formatClock(clip.end)}
+                </small>
+              </div>
+              <div className="clip-card-badges">
+                <span>{Math.round(clip.volume * 100)}%</span>
+                {clip.muted && <span className="clip-badge-muted">Mute</span>}
+                {isMissing && <span className="clip-badge-transition">파일 필요</span>}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {selectedVideoClip && selectedVideoRange && (
+        <div className="inspector">
+          <div className="clip-summary">
+            <span>
+              원본 오디오 조각 {selectedVideoRange.index + 1} ·{' '}
+              {formatClock(selectedVideoRange.start)} - {formatClock(selectedVideoRange.end)}
+            </span>
+            <span>영상과 묶여 있어 위치 이동은 영상 조각 순서를 따릅니다.</span>
+          </div>
+          <AudioMixFields
+            muted={selectedVideoClip.muted}
+            volume={normalizeAudioVolume(selectedVideoClip.volume)}
+            fadeIn={normalizeAudioFade(selectedVideoClip.fadeIn, selectedVideoRange.outputDuration)}
+            fadeOut={normalizeAudioFade(selectedVideoClip.fadeOut, selectedVideoRange.outputDuration)}
+            duration={selectedVideoRange.outputDuration}
+            onChange={(patch, groupKey) =>
+              onUpdateVideoClip(selectedVideoClip.id, patch, groupKey)
+            }
+            groupPrefix={`video-audio:${selectedVideoClip.id}`}
+          />
+        </div>
+      )}
+
+      {selectedAudioClip && (
+        <div className="inspector">
+          <label>
+            이름
+            <input
+              type="text"
+              value={selectedAudioClip.label}
+              onChange={(event) =>
+                onUpdateAudioClip(
+                  selectedAudioClip.id,
+                  { label: event.target.value },
+                  `audio-label:${selectedAudioClip.id}`
+                )
+              }
+            />
+          </label>
+          {selectedSource && (
+            <div className="clip-summary">
+              <span>
+                {selectedSource.kind === 'effect' ? '효과음' : '음악'} · {selectedSource.name}
+              </span>
+              <span>
+                원본 {formatClock(selectedAudioClip.sourceStart)} -{' '}
+                {formatClock(selectedAudioClip.sourceEnd)}
+              </span>
+            </div>
+          )}
+          <div className="field-grid two">
+            <NumberField
+              label="시작"
+              value={selectedAudioClip.start}
+              min={0}
+              step={0.05}
+              onChange={(value) =>
+                onUpdateAudioClip(
+                  selectedAudioClip.id,
+                  {
+                    start: value,
+                    end: value + getAudioClipDuration(selectedAudioClip)
+                  },
+                  `audio-time:${selectedAudioClip.id}:start`
+                )
+              }
+            />
+            <NumberField
+              label="종료"
+              value={selectedAudioClip.end}
+              min={selectedAudioClip.start + MIN_CUE_DURATION}
+              step={0.05}
+              onChange={(value) =>
+                onUpdateAudioClip(
+                  selectedAudioClip.id,
+                  {
+                    end: value,
+                    sourceEnd: selectedAudioClip.sourceStart + Math.max(MIN_CUE_DURATION, value - selectedAudioClip.start)
+                  },
+                  `audio-time:${selectedAudioClip.id}:end`
+                )
+              }
+            />
+          </div>
+          <AudioMixFields
+            muted={selectedAudioClip.muted}
+            volume={selectedAudioClip.volume}
+            fadeIn={selectedAudioClip.fadeIn}
+            fadeOut={selectedAudioClip.fadeOut}
+            duration={getAudioClipDuration(selectedAudioClip)}
+            onChange={(patch, groupKey) =>
+              onUpdateAudioClip(selectedAudioClip.id, patch, groupKey)
+            }
+            groupPrefix={`audio-mix:${selectedAudioClip.id}`}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AudioMixFields({
+  muted,
+  volume,
+  fadeIn,
+  fadeOut,
+  duration,
+  onChange,
+  groupPrefix
+}: {
+  muted: boolean;
+  volume: number;
+  fadeIn: number;
+  fadeOut: number;
+  duration: number;
+  onChange: (patch: Partial<AudioClip & VideoClip>, groupKey?: string) => void;
+  groupPrefix: string;
+}) {
+  return (
+    <>
+      <div className="field-grid two">
+        <NumberField
+          label="볼륨"
+          value={volume}
+          min={0}
+          max={2}
+          step={0.05}
+          onChange={(value) => onChange({ volume: value }, `${groupPrefix}:volume`)}
+        />
+        <label className="toggle-field">
+          <input
+            type="checkbox"
+            checked={muted}
+            onChange={(event) => onChange({ muted: event.target.checked })}
+          />
+          음소거
+        </label>
+      </div>
+      <div className="field-grid two">
+        <NumberField
+          label="Fade In"
+          value={fadeIn}
+          min={0}
+          max={Math.max(0, duration / 2)}
+          step={0.05}
+          onChange={(value) => onChange({ fadeIn: value }, `${groupPrefix}:fade-in`)}
+        />
+        <NumberField
+          label="Fade Out"
+          value={fadeOut}
+          min={0}
+          max={Math.max(0, duration / 2)}
+          step={0.05}
+          onChange={(value) => onChange({ fadeOut: value }, `${groupPrefix}:fade-out`)}
+        />
+      </div>
+    </>
   );
 }
 
@@ -6375,6 +7653,35 @@ function removeTimedRangeItems<T extends { start: number; end: number }>(
   });
 }
 
+function removeAudioRangeItems(items: AudioClip[], start: number, end: number) {
+  const rangeStart = Math.min(start, end);
+  const rangeEnd = Math.max(start, end);
+  const removedDuration = rangeEnd - rangeStart;
+
+  return items.flatMap((item) => {
+    if (item.end <= rangeStart) return [item];
+    if (item.start >= rangeEnd) {
+      return [{ ...item, start: item.start - removedDuration, end: item.end - removedDuration }];
+    }
+    if (item.start >= rangeStart && item.end <= rangeEnd) return [];
+
+    const overlapStart = Math.max(item.start, rangeStart);
+    const nextStart = item.start < rangeStart ? item.start : rangeStart;
+    const nextEnd = item.end > rangeEnd ? item.end - removedDuration : rangeStart;
+    if (nextEnd - nextStart < MIN_CUE_DURATION) return [];
+
+    return [
+      {
+        ...item,
+        start: nextStart,
+        end: nextEnd,
+        sourceStart: item.sourceStart + Math.max(0, overlapStart - item.start),
+        sourceEnd: item.sourceStart + Math.max(0, overlapStart - item.start) + (nextEnd - nextStart)
+      }
+    ];
+  });
+}
+
 function timelineClipTitle(kind: string, label: string, start: number, end: number) {
   return `${kind}: ${label} (${formatClock(start)} - ${formatClock(end)})`;
 }
@@ -6435,6 +7742,16 @@ function getVideoClipMetrics(laneHeight: number) {
   return { thumbnailHeight, metaHeight, waveHeight };
 }
 
+function renderAudioWaveformBars(waveform: AudioWaveform) {
+  const bars = waveform.length > 0
+    ? waveform.slice(0, 32)
+    : Array.from({ length: 18 }, (_, index) => 0.34 + ((index * 7) % 11) / 22);
+
+  return bars.map((value, index) => (
+    <span key={index} style={{ height: `${clamp(value, 0.12, 1) * 100}%` }} />
+  ));
+}
+
 function clampTimedRange(start: number, end: number, duration: number) {
   const itemDuration = Math.max(MIN_CUE_DURATION, end - start);
   const safeStart = clamp(start, 0, Math.max(0, duration - itemDuration));
@@ -6450,6 +7767,8 @@ function clampTimedRange(start: number, end: number, duration: number) {
 function getTimelineSelectionSummary(
   selection: Selection,
   clipRanges: ReturnType<typeof getClipTimelineRanges>,
+  audioClips: AudioClip[],
+  audioSourceMap: Map<string, AudioSourceMeta>,
   cues: CaptionCue[],
   overlays: TextOverlay[],
   effects: InteractionEffect[]
@@ -6475,8 +7794,56 @@ function getTimelineSelectionSummary(
       : '텍스트';
   }
 
+  if (selection.kind === 'audio') {
+    const clip = audioClips.find((item) => item.id === selection.id);
+    const source = clip ? audioSourceMap.get(clip.sourceId) : null;
+    return clip
+      ? `오디오 · ${clip.label || source?.name || '오디오'} · ${formatClock(clip.start)} - ${formatClock(clip.end)}`
+      : '오디오';
+  }
+
   const effect = effects.find((item) => item.id === selection.id);
   return effect ? `효과 · ${formatClock(effect.start)} - ${formatClock(effect.end)}` : '효과';
+}
+
+function getVideoClipPreviewVolume(
+  range: ReturnType<typeof getClipTimelineRanges>[number],
+  time: number
+) {
+  if (range.clip.muted) return 0;
+  const localTime = clamp(time - range.start, 0, range.outputDuration);
+  return clamp(
+    normalizeAudioVolume(range.clip.volume) *
+      getFadeMultiplier(localTime, range.outputDuration, range.clip.fadeIn, range.clip.fadeOut),
+    0,
+    1
+  );
+}
+
+function getAudioClipPreviewVolume(clip: AudioClip, time: number) {
+  if (clip.muted) return 0;
+  const duration = getAudioClipDuration(clip);
+  const localTime = clamp(time - clip.start, 0, duration);
+  return clamp(
+    normalizeAudioVolume(clip.volume) *
+      getFadeMultiplier(localTime, duration, clip.fadeIn, clip.fadeOut),
+    0,
+    1
+  );
+}
+
+function getFadeMultiplier(
+  localTime: number,
+  duration: number,
+  fadeIn?: number,
+  fadeOut?: number
+) {
+  const inDuration = normalizeAudioFade(fadeIn, duration);
+  const outDuration = normalizeAudioFade(fadeOut, duration);
+  const inMultiplier = inDuration > 0 ? clamp(localTime / inDuration, 0, 1) : 1;
+  const outMultiplier =
+    outDuration > 0 ? clamp((duration - localTime) / outDuration, 0, 1) : 1;
+  return Math.min(inMultiplier, outMultiplier);
 }
 
 function isTextEditingElement(target: EventTarget | null) {
@@ -6489,7 +7856,7 @@ function isTimelineInteractiveTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
   return Boolean(
     target.closest(
-      '.timeline-item, .clip-trim-handle, .timed-trim-handle, .timeline-track-resize-handle, .timeline-lane-resize-handle, .playhead, .timeline-transition, .timeline-snap-guide, .timeline-cut-marker'
+      '.timeline-item, .clip-trim-handle, .timed-trim-handle, .timeline-track-resize-handle, .timeline-lane-resize-handle, .playhead, .timeline-transition, .timeline-snap-guide, .clip-reorder-guide, .timeline-cut-marker'
     )
   );
 }
@@ -6629,6 +7996,63 @@ function formatTimelineTick(seconds: number) {
 
 function isVideoFile(file: File) {
   return file.type.startsWith('video/') || /\.(mp4|m4v|mov|webm|mkv|avi)$/i.test(file.name);
+}
+
+function isAudioFile(file: File) {
+  return file.type.startsWith('audio/') || /\.(mp3|m4a|aac|wav|ogg|flac|aiff)$/i.test(file.name);
+}
+
+async function readAudioDuration(file: File) {
+  if (typeof document === 'undefined') return 0;
+
+  const audio = document.createElement('audio');
+  const url = URL.createObjectURL(file);
+  audio.preload = 'metadata';
+  audio.src = url;
+
+  try {
+    await waitForMediaEvent(audio, 'loadedmetadata', 3000);
+    return Number.isFinite(audio.duration) ? audio.duration : 0;
+  } finally {
+    audio.removeAttribute('src');
+    audio.load();
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function generateAudioWaveform(file: File): Promise<AudioWaveform> {
+  const AudioContextClass =
+    window.AudioContext ||
+    (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextClass) return [];
+
+  const context = new AudioContextClass();
+  try {
+    const buffer = await context.decodeAudioData(await file.arrayBuffer());
+    const channel = buffer.getChannelData(0);
+    const samples = 32;
+    const blockSize = Math.max(1, Math.floor(channel.length / samples));
+
+    return Array.from({ length: samples }, (_, index) => {
+      const start = index * blockSize;
+      let sum = 0;
+      for (let offset = 0; offset < blockSize && start + offset < channel.length; offset += 1) {
+        sum += Math.abs(channel[start + offset]);
+      }
+      return clamp(sum / blockSize * 3.2, 0.12, 1);
+    });
+  } finally {
+    await context.close().catch(() => undefined);
+  }
+}
+
+function doesFileMatchAudioSource(file: File, source: AudioSourceMeta) {
+  const nameMatches = file.name === source.name;
+  const sizeMatches = source.size <= 0 || file.size === source.size;
+  const modifiedMatches =
+    source.lastModified <= 0 || Math.abs(file.lastModified - source.lastModified) < 2000;
+
+  return nameMatches && sizeMatches && modifiedMatches;
 }
 
 function getFontFamilyOptions(fonts: AppFontAsset[], currentFamily: string) {
@@ -7069,6 +8493,33 @@ function shiftTimelineItemsToClip<T extends { start: number; end: number }>(
         ...item,
         start,
         end
+      };
+    })
+    .filter((item) => item.end - item.start >= 0.03);
+}
+
+function shiftAudioClipsToClip(
+  items: AudioClip[],
+  rangeStart: number,
+  rangeEnd: number
+) {
+  const clipDuration = Math.max(0, rangeEnd - rangeStart);
+
+  return items
+    .filter((item) => item.start < rangeEnd && item.end > rangeStart)
+    .map((item) => {
+      const overlapStart = Math.max(item.start, rangeStart);
+      const overlapEnd = Math.min(item.end, rangeEnd);
+      const start = clamp(overlapStart - rangeStart, 0, clipDuration);
+      const end = clamp(overlapEnd - rangeStart, 0, clipDuration);
+      const sourceStart = item.sourceStart + Math.max(0, overlapStart - item.start);
+
+      return {
+        ...item,
+        start,
+        end,
+        sourceStart,
+        sourceEnd: sourceStart + Math.max(0, overlapEnd - overlapStart)
       };
     })
     .filter((item) => item.end - item.start >= 0.03);

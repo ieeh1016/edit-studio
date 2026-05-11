@@ -1,6 +1,8 @@
 import { buildAssScript } from './ass';
 import type {
   CaptionCue,
+  AudioClip,
+  AudioSourceMeta,
   ClipTransition,
   ExportPreset,
   InteractionEffect,
@@ -24,6 +26,9 @@ interface ExportOptions {
   dimensions: VideoDimensions;
   sourceDuration?: number;
   hasAudio?: boolean;
+  audioSources?: AudioSourceMeta[];
+  audioClips?: AudioClip[];
+  audioFiles?: Record<string, File>;
   fontFiles?: File[];
   signal?: AbortSignal;
   onProgress?: (progress: number) => void;
@@ -91,6 +96,14 @@ export async function exportVideoWithBurnedSubtitles(
     const extension = file.name.split('.').pop()?.toLowerCase() || 'ttf';
     return `${fontDirName}/local-font-${index}.${extension}`;
   });
+  const externalAudioInputs = (options.audioSources ?? []).flatMap((source) => {
+    const file = options.audioFiles?.[source.id];
+    return file ? [{ source, file }] : [];
+  });
+  const externalAudioNames = externalAudioInputs.map(({ file }, index) => {
+    const extension = file.name.split('.').pop()?.toLowerCase() || 'm4a';
+    return `audio-${index}-${jobId}.${extension}`;
+  });
   const outputName = `captioned-output-${jobId}.mp4`;
 
   try {
@@ -108,6 +121,11 @@ export async function exportVideoWithBurnedSubtitles(
         ffmpeg.writeFile(localFontNames[index], await fetchFile(file), {
           signal: options.signal
         })
+      ),
+      ...externalAudioInputs.map(async ({ file }, index) =>
+        ffmpeg.writeFile(externalAudioNames[index], await fetchFile(file), {
+          signal: options.signal
+        })
       )
     ]);
 
@@ -120,7 +138,11 @@ export async function exportVideoWithBurnedSubtitles(
         outputDimensions,
         subtitleName,
         fontDirName,
-        hasAudio
+        hasAudio,
+        audioClips: options.audioClips ?? [],
+        audioInputIndexes: Object.fromEntries(
+          externalAudioInputs.map(({ source }, index) => [source.id, index + 1])
+        )
       });
 
       options.onStatus?.('MP4 렌더링 중');
@@ -128,6 +150,7 @@ export async function exportVideoWithBurnedSubtitles(
         [
           '-i',
           inputName,
+          ...externalAudioNames.flatMap((name) => ['-i', name]),
           '-sn',
           '-filter_complex',
           filterGraph,
@@ -199,6 +222,7 @@ export async function exportVideoWithBurnedSubtitles(
       ffmpeg.deleteFile(subtitleName),
       ffmpeg.deleteFile(fontName),
       ...localFontNames.map((name) => ffmpeg.deleteFile(name)),
+      ...externalAudioNames.map((name) => ffmpeg.deleteFile(name)),
       ffmpeg.deleteFile(outputName)
     ]);
     await Promise.allSettled([ffmpeg.deleteDir(fontDirName)]);
@@ -211,7 +235,9 @@ export function buildVideoEditFilterGraph({
   outputDimensions,
   subtitleName,
   fontDirName,
-  hasAudio = true
+  hasAudio = true,
+  audioClips = [],
+  audioInputIndexes = {}
 }: {
   clips: VideoClip[];
   transitions: ClipTransition[];
@@ -219,6 +245,8 @@ export function buildVideoEditFilterGraph({
   subtitleName: string;
   fontDirName?: string;
   hasAudio?: boolean;
+  audioClips?: AudioClip[];
+  audioInputIndexes?: Record<string, number>;
 }) {
   const normalizedTransitions = normalizeTransitionsForClips(clips, transitions);
   const parts: string[] = [];
@@ -234,11 +262,28 @@ export function buildVideoEditFilterGraph({
       }:${outputDimensions.height}:flags=lanczos,setsar=1,format=yuv420p[v${index}]`
     );
 
-    if (clip.muted || !hasAudio) {
+    const volume = formatFilterNumber(clampAudioVolume(clip.volume));
+    const fadeIn = clampAudioFade(clip.fadeIn, outputDuration);
+    const fadeOut = clampAudioFade(clip.fadeOut, outputDuration);
+    const audioFilters = [
+      `volume=${clip.muted ? '0' : volume}`,
+      ...(fadeIn > 0
+        ? [`afade=t=in:st=0:d=${formatFilterNumber(fadeIn)}`]
+        : []),
+      ...(fadeOut > 0
+        ? [
+            `afade=t=out:st=${formatFilterNumber(
+              Math.max(0, outputDuration - fadeOut)
+            )}:d=${formatFilterNumber(fadeOut)}`
+          ]
+        : [])
+    ];
+
+    if (!hasAudio) {
       parts.push(
         `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${formatFilterNumber(
           outputDuration
-        )},asetpts=PTS-STARTPTS[a${index}]`
+        )},asetpts=PTS-STARTPTS,${audioFilters.join(',')}[a${index}]`
       );
     } else {
       parts.push(
@@ -246,7 +291,7 @@ export function buildVideoEditFilterGraph({
           clip.sourceEnd
         )},asetpts=PTS-STARTPTS,${buildAtempoChain(speed).join(
           ','
-        )},aformat=channel_layouts=stereo,aresample=48000[a${index}]`
+        )},aformat=channel_layouts=stereo,aresample=48000,${audioFilters.join(',')}[a${index}]`
       );
     }
   });
@@ -300,9 +345,59 @@ export function buildVideoEditFilterGraph({
       fontDirName ?? '.'
     },format=yuv420p[outv]`
   );
-  parts.push(`[${currentAudioLabel}]anull[outa]`);
+  const mixInputs = [`[${currentAudioLabel}]`];
+  audioClips.forEach((clip, index) => {
+    const inputIndex = audioInputIndexes[clip.sourceId];
+    if (!inputIndex) return;
+
+    const duration = Math.max(0.03, clip.end - clip.start);
+    const sourceEnd = Math.max(clip.sourceStart + 0.03, clip.sourceEnd);
+    const volume = clip.muted ? 0 : clampAudioVolume(clip.volume);
+    const fadeIn = clampAudioFade(clip.fadeIn, duration);
+    const fadeOut = clampAudioFade(clip.fadeOut, duration);
+    const delayMs = Math.max(0, Math.round(clip.start * 1000));
+    const outputLabel = `ma${index}`;
+    const filters = [
+      `[${inputIndex}:a]atrim=start=${formatFilterNumber(
+        clip.sourceStart
+      )}:end=${formatFilterNumber(sourceEnd)}`,
+      'asetpts=PTS-STARTPTS',
+      'aformat=channel_layouts=stereo',
+      'aresample=48000',
+      `volume=${formatFilterNumber(volume)}`,
+      ...(fadeIn > 0
+        ? [`afade=t=in:st=0:d=${formatFilterNumber(fadeIn)}`]
+        : []),
+      ...(fadeOut > 0
+        ? [
+            `afade=t=out:st=${formatFilterNumber(
+              Math.max(0, duration - fadeOut)
+            )}:d=${formatFilterNumber(fadeOut)}`
+          ]
+        : []),
+      `adelay=${delayMs}|${delayMs}[${outputLabel}]`
+    ];
+    parts.push(filters.join(','));
+    mixInputs.push(`[${outputLabel}]`);
+  });
+
+  if (mixInputs.length > 1) {
+    parts.push(
+      `${mixInputs.join('')}amix=inputs=${mixInputs.length}:duration=first:dropout_transition=0[outa]`
+    );
+  } else {
+    parts.push(`[${currentAudioLabel}]anull[outa]`);
+  }
 
   return parts.join(';');
+}
+
+function clampAudioVolume(value: number | undefined) {
+  return Math.max(0, Math.min(value ?? 1, 2));
+}
+
+function clampAudioFade(value: number | undefined, duration: number) {
+  return Math.max(0, Math.min(value ?? 0, Math.max(0, duration / 2)));
 }
 
 export function getExportDimensions(

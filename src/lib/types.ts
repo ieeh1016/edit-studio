@@ -1,6 +1,7 @@
 export type CaptionPosition = 'bottom' | 'middle' | 'top';
 export type TextAlign = 'left' | 'center' | 'right';
 export type ExportPreset = 'fast720' | 'source';
+export type AudioSourceKind = 'music' | 'effect';
 export type ClipTransitionKind =
   | 'fade'
   | 'slideleft'
@@ -69,6 +70,9 @@ export interface VideoClip {
   sourceEnd: number;
   speed: number;
   muted: boolean;
+  volume?: number;
+  fadeIn?: number;
+  fadeOut?: number;
 }
 
 export interface ClipTransition {
@@ -91,6 +95,29 @@ export interface InteractionEffect {
   label: string;
 }
 
+export interface AudioSourceMeta {
+  id: string;
+  name: string;
+  size: number;
+  lastModified: number;
+  duration: number;
+  kind: AudioSourceKind;
+}
+
+export interface AudioClip {
+  id: string;
+  sourceId: string;
+  start: number;
+  end: number;
+  sourceStart: number;
+  sourceEnd: number;
+  volume: number;
+  muted: boolean;
+  fadeIn: number;
+  fadeOut: number;
+  label: string;
+}
+
 export interface ProjectMediaMeta {
   name: string;
   size: number;
@@ -109,6 +136,8 @@ export interface ProjectFile {
   effects: InteractionEffect[];
   videoClips?: VideoClip[];
   transitions?: ClipTransition[];
+  audioSources?: AudioSourceMeta[];
+  audioClips?: AudioClip[];
   createdAt: string;
   updatedAt: string;
 }
@@ -119,6 +148,8 @@ export interface EditorSnapshot {
   effects: InteractionEffect[];
   videoClips: VideoClip[];
   transitions: ClipTransition[];
+  audioSources: AudioSourceMeta[];
+  audioClips: AudioClip[];
 }
 
 export interface VideoDimensions {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { buildAssScript, escapeAssText, hexToAssColor } from '../src/lib/ass';
+import {
+  getAudioClipDuration,
+  moveAudioClipTo,
+  trimAudioClip
+} from '../src/lib/audio-edit';
 import { getCueDiagnostics } from '../src/lib/diagnostics';
 import { createExportPreflightResult } from '../src/lib/export-preflight';
 import { inferFontVariantFromName } from '../src/lib/fonts';
@@ -16,7 +21,9 @@ import {
   createOrUpdateTransition,
   getClipTimelineRanges,
   getEditTimelineDuration,
+  moveClipByOffset,
   removeTimelineRange,
+  reorderClipRipple,
   splitClipAtTimelineTime
 } from '../src/lib/video-edit';
 import {
@@ -246,6 +253,31 @@ describe('project file normalization', () => {
           kind: 'spin',
           duration: 10
         }
+      ],
+      audioSources: [
+        {
+          id: 'audio-source-1',
+          name: 'bgm.mp3',
+          size: 2048,
+          lastModified: 1700000000001,
+          duration: 12,
+          kind: 'music'
+        }
+      ],
+      audioClips: [
+        {
+          id: 'audio-clip-1',
+          sourceId: 'audio-source-1',
+          start: 2,
+          end: 6,
+          sourceStart: 1,
+          sourceEnd: 5,
+          volume: 3,
+          muted: false,
+          fadeIn: 9,
+          fadeOut: 1,
+          label: 'BGM'
+        }
       ]
     });
 
@@ -282,6 +314,9 @@ describe('project file normalization', () => {
     expect(project.videoClips?.[0].muted).toBe(true);
     expect(project.transitions?.[0].kind).toBe('fade');
     expect(project.transitions?.[0].duration).toBeLessThanOrEqual(0.5);
+    expect(project.audioSources?.[0].kind).toBe('music');
+    expect(project.audioClips?.[0].volume).toBe(2);
+    expect(project.audioClips?.[0].fadeIn).toBe(2);
   });
 });
 
@@ -384,6 +419,78 @@ describe('video clip editing', () => {
     expect(result?.clips[1].sourceEnd).toBe(4);
   });
 
+  it('moves and trims audio clips while preserving source timing', () => {
+    const source = {
+      id: 'audio-source',
+      name: 'music.mp3',
+      size: 100,
+      lastModified: 1000,
+      duration: 10,
+      kind: 'music' as const
+    };
+    const clip = {
+      id: 'audio-clip',
+      sourceId: source.id,
+      start: 2,
+      end: 6,
+      sourceStart: 1,
+      sourceEnd: 5,
+      volume: 1,
+      muted: false,
+      fadeIn: 0,
+      fadeOut: 0,
+      label: 'Music'
+    };
+
+    expect(getAudioClipDuration(clip)).toBe(4);
+    expect(moveAudioClipTo(clip, 4, 20)).toMatchObject({ start: 4, end: 8 });
+    expect(trimAudioClip(clip, 'start', 3, source)).toMatchObject({
+      start: 3,
+      sourceStart: 2
+    });
+    expect(trimAudioClip(clip, 'end', 4, source)).toMatchObject({
+      end: 4,
+      sourceEnd: 3
+    });
+  });
+
+  it('reorders cut clips without changing their source ranges', () => {
+    const result = reorderClipRipple(clips, [], 'clip-b', 0);
+
+    expect(result?.clips.map((clip) => clip.id)).toEqual(['clip-b', 'clip-a']);
+    expect(result?.clips[0].sourceStart).toBe(4);
+    expect(result?.clips[0].sourceEnd).toBe(10);
+    expect(result?.selectedClipId).toBe('clip-b');
+    expect(result?.fromIndex).toBe(1);
+    expect(result?.toIndex).toBe(0);
+  });
+
+  it('keeps only transitions that still connect adjacent clips after reorder', () => {
+    const threeClips = [
+      ...clips,
+      {
+        id: 'clip-c',
+        sourceStart: 10,
+        sourceEnd: 12,
+        speed: 1,
+        muted: false
+      }
+    ];
+    const transitions = createOrUpdateTransition(
+      threeClips,
+      createOrUpdateTransition(threeClips, [], 'clip-a', 'fade', 0.5),
+      'clip-b',
+      'slideleft',
+      0.5
+    );
+    const result = moveClipByOffset(threeClips, transitions, 'clip-c', -2);
+
+    expect(result?.clips.map((clip) => clip.id)).toEqual(['clip-c', 'clip-a', 'clip-b']);
+    expect(result?.transitions).toHaveLength(1);
+    expect(result?.transitions[0].fromClipId).toBe('clip-a');
+    expect(result?.transitions[0].toClipId).toBe('clip-b');
+  });
+
   it('builds an FFmpeg filter graph with trim, speed and transition filters', () => {
     const transitions = createOrUpdateTransition(clips, [], 'clip-a', 'slideleft', 0.5);
     const graph = buildVideoEditFilterGraph({
@@ -415,6 +522,48 @@ describe('video clip editing', () => {
     expect(graph).toContain('concat=n=2:v=0:a=1');
   });
 
+  it('applies video clip volume and fade filters to source audio', () => {
+    const graph = buildVideoEditFilterGraph({
+      clips: [{ ...clips[0], volume: 0.45, fadeIn: 0.5, fadeOut: 0.75 }],
+      transitions: [],
+      outputDimensions: { width: 1280, height: 720 },
+      subtitleName: 'captions.ass'
+    });
+
+    expect(graph).toContain('volume=0.45');
+    expect(graph).toContain('afade=t=in:st=0:d=0.5');
+    expect(graph).toContain('afade=t=out:st=3.25:d=0.75');
+  });
+
+  it('mixes external music and sound effect clips into the export graph', () => {
+    const graph = buildVideoEditFilterGraph({
+      clips: [clips[0]],
+      transitions: [],
+      outputDimensions: { width: 1280, height: 720 },
+      subtitleName: 'captions.ass',
+      audioInputIndexes: { music: 1 },
+      audioClips: [
+        {
+          id: 'audio-1',
+          sourceId: 'music',
+          start: 1,
+          end: 3,
+          sourceStart: 0.5,
+          sourceEnd: 2.5,
+          volume: 0.8,
+          muted: false,
+          fadeIn: 0.25,
+          fadeOut: 0.5,
+          label: 'BGM'
+        }
+      ]
+    });
+
+    expect(graph).toContain('[1:a]atrim=start=0.5:end=2.5');
+    expect(graph).toContain('adelay=1000|1000');
+    expect(graph).toContain('amix=inputs=2:duration=first');
+  });
+
   it('reports export preflight risks before rendering', () => {
     const result = createExportPreflightResult({
       sourceDuration: 1500,
@@ -441,14 +590,18 @@ describe('editor history', () => {
       overlays: [],
       effects: [],
       videoClips: [],
-      transitions: []
+      transitions: [],
+      audioSources: [],
+      audioClips: []
     });
     const changed = commitEditorHistory(initial, {
       cues: [initialCue, nextCue],
       overlays: [],
       effects: [],
       videoClips: [],
-      transitions: []
+      transitions: [],
+      audioSources: [],
+      audioClips: []
     });
 
     expect(changed.present.cues).toHaveLength(2);
@@ -463,14 +616,18 @@ describe('editor history', () => {
       overlays: [],
       effects: [],
       videoClips: [],
-      transitions: []
+      transitions: [],
+      audioSources: [],
+      audioClips: []
     });
     const first = commitEditorHistory(initial, {
       cues: [{ ...cue, text: 'AB' }],
       overlays: [],
       effects: [],
       videoClips: [],
-      transitions: []
+      transitions: [],
+      audioSources: [],
+      audioClips: []
     });
     const second = commitEditorHistory(
       first,
@@ -479,7 +636,9 @@ describe('editor history', () => {
         overlays: [],
         effects: [],
         videoClips: [],
-        transitions: []
+        transitions: [],
+        audioSources: [],
+        audioClips: []
       },
       { merge: true }
     );

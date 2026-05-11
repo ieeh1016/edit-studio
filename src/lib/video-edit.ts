@@ -1,5 +1,6 @@
 import type { ClipTransition, ClipTransitionKind, VideoClip } from './types';
 import { clamp, MIN_CUE_DURATION } from './time';
+import { normalizeVideoClipAudio } from './audio-edit';
 
 export const DEFAULT_TRANSITION_DURATION = 0.5;
 export const MIN_CLIP_SOURCE_DURATION = MIN_CUE_DURATION;
@@ -20,7 +21,10 @@ export function createDefaultVideoClip(sourceDuration: number): VideoClip {
     sourceStart: 0,
     sourceEnd: Math.max(sourceDuration, MIN_CLIP_SOURCE_DURATION),
     speed: DEFAULT_CLIP_SPEED,
-    muted: false
+    muted: false,
+    volume: 1,
+    fadeIn: 0,
+    fadeOut: 0
   };
 }
 
@@ -47,13 +51,13 @@ export function normalizeVideoClip(clip: VideoClip, sourceDuration?: number): Vi
     maxEnd
   );
 
-  return {
+  return normalizeVideoClipAudio({
     ...clip,
     sourceStart,
     sourceEnd,
     speed: normalizeSpeed(clip.speed),
     muted: Boolean(clip.muted)
-  };
+  });
 }
 
 export function getTransitionBetween(
@@ -373,6 +377,43 @@ export function deleteClipRipple(
       )
     )
   };
+}
+
+export function reorderClipRipple(
+  clips: VideoClip[],
+  transitions: ClipTransition[],
+  clipId: string,
+  targetIndex: number
+) {
+  const fromIndex = clips.findIndex((clip) => clip.id === clipId);
+  if (fromIndex < 0 || clips.length <= 1) return null;
+
+  const toIndex = clamp(Math.round(targetIndex), 0, clips.length - 1);
+  if (fromIndex === toIndex) return null;
+
+  const nextClips = [...clips];
+  const [clip] = nextClips.splice(fromIndex, 1);
+  nextClips.splice(toIndex, 0, clip);
+
+  return {
+    clips: nextClips,
+    transitions: normalizeTransitionsForClips(nextClips, transitions),
+    selectedClipId: clip.id,
+    fromIndex,
+    toIndex
+  };
+}
+
+export function moveClipByOffset(
+  clips: VideoClip[],
+  transitions: ClipTransition[],
+  clipId: string,
+  offset: number
+) {
+  const fromIndex = clips.findIndex((clip) => clip.id === clipId);
+  if (fromIndex < 0) return null;
+
+  return reorderClipRipple(clips, transitions, clipId, fromIndex + offset);
 }
 
 export function createOrUpdateTransition(
