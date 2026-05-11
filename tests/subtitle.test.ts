@@ -540,9 +540,37 @@ describe('video clip editing', () => {
 
     expect(graph).toContain('trim=start=0:end=4');
     expect(graph).toContain('setpts=(PTS-STARTPTS)/2');
+    expect(graph).toContain('force_original_aspect_ratio=increase');
     expect(graph).toContain('xfade=transition=slideleft');
     expect(graph).toContain('acrossfade=d=0.5');
     expect(graph).toContain('subtitles=captions.ass:fontsdir=fonts-test');
+  });
+
+  it('can build a letterbox-style graph that preserves the full source frame', () => {
+    const graph = buildVideoEditFilterGraph({
+      clips: [clips[0]],
+      transitions: [],
+      outputDimensions: { width: 1920, height: 1080 },
+      fitMode: 'contain',
+      subtitleName: 'captions.ass'
+    });
+
+    expect(graph).toContain('force_original_aspect_ratio=decrease');
+    expect(graph).toContain('color=c=black:s=1920x1080');
+    expect(graph).toContain('[bg0][vf0]overlay');
+  });
+
+  it('can build a stretched graph when aspect ratio preservation is disabled', () => {
+    const graph = buildVideoEditFilterGraph({
+      clips: [clips[0]],
+      transitions: [],
+      outputDimensions: { width: 1920, height: 1080 },
+      fitMode: 'stretch',
+      subtitleName: 'captions.ass'
+    });
+
+    expect(graph).toContain('scale=w=1920:h=1080:flags=lanczos');
+    expect(graph).not.toContain('force_original_aspect_ratio');
   });
 
   it('adds multi-source video inputs and timed image overlays to the export graph', () => {

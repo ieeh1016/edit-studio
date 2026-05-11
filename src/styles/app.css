@@ -6066,7 +6066,8 @@ select:focus {
   color: #d9fbff;
 }
 
-.toolbar-group.export .export-preset-select {
+.toolbar-group.export .export-preset-select,
+.toolbar-group.export .export-fit-select {
   width: 138px;
   min-width: 138px;
   margin-left: 4px;
@@ -6076,6 +6077,11 @@ select:focus {
     #0a0e14;
   color: #d7dee9;
   font-size: 11px;
+}
+
+.toolbar-group.export .export-fit-select {
+  width: 112px;
+  min-width: 112px;
 }
 
 .toolbar-group .primary {

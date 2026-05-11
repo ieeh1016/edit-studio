@@ -124,6 +124,7 @@ import {
   type ClipTransition,
   type ClipTransitionKind,
   type EditorSnapshot,
+  type ExportFitMode,
   type ExportPreset,
   type ImageClip,
   type InteractionEffect,
@@ -507,6 +508,7 @@ export function App() {
   const [selection, setSelection] = useState<Selection>(null);
   const [panelMode, setPanelMode] = useState<PanelMode>('video');
   const [exportPreset, setExportPreset] = useState<ExportPreset>('fast720');
+  const [exportFitMode, setExportFitMode] = useState<ExportFitMode>('cover');
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportPhase, setExportPhase] = useState<ExportPhase>('idle');
@@ -2463,6 +2465,7 @@ export function App() {
         jobTransitions,
         {
           preset: exportPreset,
+          fitMode: exportFitMode,
           dimensions,
           customDimensions: customExportDimensions,
           sourceDuration: duration,
@@ -3217,6 +3220,17 @@ export function App() {
                 <option value="source">원본 해상도</option>
                 <option value="shorts1080">쇼츠 1080x1920</option>
                 <option value="custom">사용자 지정</option>
+              </select>
+              <select
+                className="export-fit-select"
+                value={exportFitMode}
+                onChange={(event) => setExportFitMode(event.target.value as ExportFitMode)}
+                aria-label="영상 맞춤 방식"
+                title="출력 캔버스에 원본 영상을 맞추는 방식"
+              >
+                <option value="cover">꽉 채우기</option>
+                <option value="contain">전체 보이기</option>
+                <option value="stretch">늘리기</option>
               </select>
               {exportPreset === 'custom' && (
                 <span className="export-custom-size">

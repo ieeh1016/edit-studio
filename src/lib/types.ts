@@ -1,6 +1,7 @@
 export type CaptionPosition = 'bottom' | 'middle' | 'top';
 export type TextAlign = 'left' | 'center' | 'right';
 export type ExportPreset = 'fast720' | 'hd1080' | 'source' | 'shorts1080' | 'custom';
+export type ExportFitMode = 'cover' | 'contain' | 'stretch';
 export type AudioSourceKind = 'music' | 'effect';
 export type MediaSourceKind = 'video' | 'image' | 'audio';
 export type CanvasAspectPreset = 'source' | '16:9' | '9:16' | '1:1' | 'custom';

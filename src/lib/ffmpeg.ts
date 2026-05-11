@@ -5,6 +5,7 @@ import {
   type AudioClip,
   type AudioSourceMeta,
   type ClipTransition,
+  type ExportFitMode,
   type ExportPreset,
   type ImageClip,
   type InteractionEffect,
@@ -25,6 +26,7 @@ import wasmURL from '@ffmpeg/core/wasm?url';
 
 interface ExportOptions {
   preset: ExportPreset;
+  fitMode?: ExportFitMode;
   dimensions: VideoDimensions;
   customDimensions?: VideoDimensions;
   sourceDuration?: number;
@@ -180,6 +182,7 @@ export async function exportVideoWithBurnedSubtitles(
         clips,
         transitions,
         outputDimensions,
+        fitMode: options.fitMode ?? 'cover',
         subtitleName,
         fontDirName,
         hasAudio,
@@ -294,6 +297,7 @@ export function buildVideoEditFilterGraph({
   clips,
   transitions,
   outputDimensions,
+  fitMode = 'cover',
   subtitleName,
   fontDirName,
   hasAudio = true,
@@ -306,6 +310,7 @@ export function buildVideoEditFilterGraph({
   clips: VideoClip[];
   transitions: ClipTransition[];
   outputDimensions: VideoDimensions;
+  fitMode?: ExportFitMode;
   subtitleName: string;
   fontDirName?: string;
   hasAudio?: boolean;
@@ -327,6 +332,7 @@ export function buildVideoEditFilterGraph({
     const cropHeight = formatFilterNumber(Math.max(0.1, 1 - (crop.top + crop.bottom) / 100));
     const cropX = formatFilterNumber(crop.left / 100);
     const cropY = formatFilterNumber(crop.top / 100);
+    const fitFilters = buildVideoFitFilters(outputDimensions, fitMode);
     const transformScale = formatFilterNumber(clampNumber(clip.scale, 0.1, 8));
     const rotation = formatFilterNumber((clampNumber(clip.rotation, -180, 180) * Math.PI) / 180);
     const opacity = formatFilterNumber(clampNumber(clip.opacity, 0, 1));
@@ -337,9 +343,9 @@ export function buildVideoEditFilterGraph({
         clip.sourceEnd
       )},setpts=(PTS-STARTPTS)/${formatFilterNumber(
         speed
-      )},crop=w=iw*${cropWidth}:h=ih*${cropHeight}:x=iw*${cropX}:y=ih*${cropY},scale=${
-        outputDimensions.width
-      }*${transformScale}:-2:flags=lanczos,rotate=${rotation}:ow=rotw(${rotation}):oh=roth(${rotation}):c=black@0,format=rgba,colorchannelmixer=aa=${opacity}[vf${index}]`
+      )},crop=w=iw*${cropWidth}:h=ih*${cropHeight}:x=iw*${cropX}:y=ih*${cropY},${fitFilters.join(
+        ','
+      )},scale=iw*${transformScale}:-2:flags=lanczos,rotate=${rotation}:ow=rotw(${rotation}):oh=roth(${rotation}):c=black@0,format=rgba,colorchannelmixer=aa=${opacity}[vf${index}]`
     );
     parts.push(
       `color=c=black:s=${outputDimensions.width}x${outputDimensions.height}:d=${formatFilterNumber(
@@ -509,6 +515,26 @@ function clampAudioVolume(value: number | undefined) {
 
 function clampAudioFade(value: number | undefined, duration: number) {
   return Math.max(0, Math.min(value ?? 0, Math.max(0, duration / 2)));
+}
+
+function buildVideoFitFilters(dimensions: VideoDimensions, fitMode: ExportFitMode) {
+  const width = ensureEven(dimensions.width);
+  const height = ensureEven(dimensions.height);
+
+  if (fitMode === 'contain') {
+    return [
+      `scale=w=${width}:h=${height}:force_original_aspect_ratio=decrease:flags=lanczos`
+    ];
+  }
+
+  if (fitMode === 'stretch') {
+    return [`scale=w=${width}:h=${height}:flags=lanczos`];
+  }
+
+  return [
+    `scale=w=${width}:h=${height}:force_original_aspect_ratio=increase:flags=lanczos`,
+    `crop=w=${width}:h=${height}:x=(iw-${width})/2:y=(ih-${height})/2`
+  ];
 }
 
 export function getExportDimensions(
