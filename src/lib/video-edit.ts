@@ -359,6 +359,79 @@ export function removeTimelineRange(
   };
 }
 
+export function extractTimelineRange(
+  clips: VideoClip[],
+  transitions: ClipTransition[],
+  start: number,
+  end: number
+) {
+  const ranges = getClipTimelineRanges(clips, transitions);
+  const timelineDuration = Math.max(0, ranges[ranges.length - 1]?.end ?? 0);
+  const rangeStart = clamp(Math.min(start, end), 0, timelineDuration);
+  const rangeEnd = clamp(Math.max(start, end), 0, timelineDuration);
+
+  if (rangeEnd - rangeStart < MIN_CLIP_SOURCE_DURATION) return null;
+
+  const selectedRanges = ranges
+    .map((range) => {
+      const overlapStart = Math.max(range.start, rangeStart);
+      const overlapEnd = Math.min(range.end, rangeEnd);
+      const outputDuration = overlapEnd - overlapStart;
+
+      if (outputDuration < MIN_CLIP_SOURCE_DURATION) return null;
+
+      const sourceStart = rangeTimelineToSourceTime(range, overlapStart);
+      const sourceEnd = rangeTimelineToSourceTime(range, overlapEnd);
+
+      if (sourceEnd - sourceStart < MIN_CLIP_SOURCE_DURATION) return null;
+
+      return {
+        range,
+        clip: {
+          ...range.clip,
+          sourceStart,
+          sourceEnd
+        }
+      };
+    })
+    .filter(Boolean) as Array<{ range: ClipTimelineRange; clip: VideoClip }>;
+
+  if (selectedRanges.length === 0) return null;
+
+  const nextClips = selectedRanges.map((item) => item.clip);
+  const nextTransitions: ClipTransition[] = [];
+
+  for (let index = 0; index < selectedRanges.length - 1; index += 1) {
+    const current = selectedRanges[index];
+    const next = selectedRanges[index + 1];
+    const transition = getTransitionBetween(
+      transitions,
+      current.range.clip.id,
+      next.range.clip.id
+    );
+
+    if (!transition) continue;
+
+    const transitionStart = current.range.end - transition.duration;
+    const transitionEnd = current.range.end;
+    const visibleTransitionDuration =
+      Math.min(rangeEnd, transitionEnd) - Math.max(rangeStart, transitionStart);
+
+    if (visibleTransitionDuration < MIN_CLIP_SOURCE_DURATION) continue;
+
+    nextTransitions.push({
+      ...transition,
+      duration: Math.min(transition.duration, visibleTransitionDuration)
+    });
+  }
+
+  return {
+    clips: nextClips,
+    transitions: normalizeTransitionsForClips(nextClips, nextTransitions),
+    duration: rangeEnd - rangeStart
+  };
+}
+
 export function insertDuplicateClipAfter(
   clips: VideoClip[],
   transitions: ClipTransition[],

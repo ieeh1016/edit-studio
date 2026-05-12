@@ -91,6 +91,7 @@ import {
   createDefaultVideoClip,
   createOrUpdateTransition,
   deleteClipRipple,
+  extractTimelineRange,
   findClipRangeAtTime,
   getClipTimelineRanges,
   getEditTimelineDuration,
@@ -2614,6 +2615,40 @@ export function App() {
     });
   }
 
+  async function exportMarkedRangeMp4() {
+    if (cutRangeStart === null || cutRangeEnd === null || !hasCutRange) {
+      setStatus('먼저 IN/OUT으로 렌더링할 구간을 지정하세요.');
+      return;
+    }
+
+    const rangeExport = extractTimelineRange(videoClips, transitions, cutRangeStart, cutRangeEnd);
+    if (!rangeExport) {
+      setStatus('선택한 IN/OUT 구간을 렌더링할 수 없습니다.');
+      return;
+    }
+
+    const saveTarget = await chooseMp4SaveTargetSafely(
+      `edit-studio-range-${formatClock(cutRangeStart)}-${formatClock(cutRangeEnd)}.mp4`
+    );
+    if (!saveTarget) {
+      setStatus('구간 MP4 저장을 취소했습니다.');
+      return;
+    }
+
+    await renderMp4Job({
+      jobLabel: `구간 MP4 ${formatClock(cutRangeStart)} - ${formatClock(cutRangeEnd)}`,
+      doneMessage: `${saveTarget.fileName} 다운로드 준비 완료`,
+      saveTarget,
+      jobCues: shiftTimelineItemsToClip(cues, cutRangeStart, cutRangeEnd),
+      jobOverlays: shiftTimelineItemsToClip(overlays, cutRangeStart, cutRangeEnd),
+      jobEffects: shiftTimelineItemsToClip(effects, cutRangeStart, cutRangeEnd),
+      jobImageClips: shiftTimelineItemsToClip(imageClips, cutRangeStart, cutRangeEnd),
+      jobClips: rangeExport.clips,
+      jobTransitions: rangeExport.transitions,
+      jobAudioClips: shiftAudioClipsToClip(audioClips, cutRangeStart, cutRangeEnd)
+    });
+  }
+
   function cancelExport() {
     exportControllerRef.current?.abort();
     cancelActiveExport();
@@ -3670,12 +3705,12 @@ export function App() {
             </div>
             <div
               className={`context-chip ${
-                hasCutRange ? 'danger' : cutRange.start !== null || cutRange.end !== null ? 'pending' : ''
+                hasCutRange ? 'ready' : cutRange.start !== null || cutRange.end !== null ? 'pending' : ''
               }`}
             >
-              <span>삭제 예정</span>
+              <span>IN/OUT</span>
               <strong>{cutRangeStateLabel}</strong>
-              {hasCutRange && <em>{formatClock(cutRangeDuration)} 제거</em>}
+              {hasCutRange && <em>{formatClock(cutRangeDuration)} 선택</em>}
             </div>
             <div className="context-chip">
               <span>출력</span>
@@ -3744,6 +3779,15 @@ export function App() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => void exportMarkedRangeMp4()}
+                  disabled={!hasCutRange || isExporting}
+                  title="IN/OUT 사이의 영상, 자막, 텍스트, 효과, 오디오만 빠르게 MP4로 저장합니다."
+                >
+                  <Download size={14} />
+                  구간 MP4
+                </button>
+                <button
+                  type="button"
                   onClick={clearCutRange}
                   disabled={cutRange.start === null && cutRange.end === null}
                 >
@@ -3769,11 +3813,11 @@ export function App() {
           </div>
           {(cutRange.start !== null || cutRange.end !== null) && (
             <div className={`cut-range-status ${hasCutRange ? 'ready' : 'pending'}`}>
-              <span>{hasCutRange ? '삭제 예정' : '삭제 범위'}</span>
+              <span>{hasCutRange ? '선택 구간' : '범위 미완성'}</span>
               <strong>{cutRange.start !== null ? formatClock(cutRange.start) : 'IN 없음'}</strong>
               <span>-</span>
               <strong>{cutRange.end !== null ? formatClock(cutRange.end) : 'OUT 없음'}</strong>
-              <em>{hasCutRange ? `${formatClock(cutRangeDuration)} 제거` : 'IN/OUT 필요'}</em>
+              <em>{hasCutRange ? `${formatClock(cutRangeDuration)} 렌더 가능` : 'IN/OUT 필요'}</em>
             </div>
           )}
 

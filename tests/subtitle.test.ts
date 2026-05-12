@@ -20,6 +20,7 @@ import { normalizeProjectFile } from '../src/lib/project';
 import {
   buildAtempoChain,
   createOrUpdateTransition,
+  extractTimelineRange,
   getClipTimelineRanges,
   getEditTimelineDuration,
   moveClipByOffset,
@@ -444,6 +445,28 @@ describe('video clip editing', () => {
     expect(result?.clips[1].sourceStart).toBe(6);
     expect(result?.clips[1].sourceEnd).toBe(10);
     expect(getEditTimelineDuration(result?.clips ?? [], [])).toBe(3);
+  });
+
+  it('extracts an IN/OUT range across clips for partial MP4 rendering', () => {
+    const result = extractTimelineRange(clips, [], 1, 5);
+
+    expect(result?.clips).toHaveLength(2);
+    expect(result?.clips[0].sourceStart).toBe(1);
+    expect(result?.clips[0].sourceEnd).toBe(4);
+    expect(result?.clips[1].sourceStart).toBe(4);
+    expect(result?.clips[1].sourceEnd).toBe(6);
+    expect(result?.transitions).toHaveLength(0);
+    expect(getEditTimelineDuration(result?.clips ?? [], result?.transitions ?? [])).toBe(4);
+  });
+
+  it('preserves fully visible transitions when extracting a render range', () => {
+    const transitions = createOrUpdateTransition(clips, [], 'clip-a', 'fade', 1);
+    const result = extractTimelineRange(clips, transitions, 2, 5);
+
+    expect(result?.clips).toHaveLength(2);
+    expect(result?.transitions).toHaveLength(1);
+    expect(result?.transitions[0].duration).toBe(1);
+    expect(getEditTimelineDuration(result?.clips ?? [], result?.transitions ?? [])).toBe(3);
   });
 
   it('splits one source clip when removing a middle section', () => {

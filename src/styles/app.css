@@ -5717,6 +5717,18 @@ select:focus {
   color: #ffd8df;
 }
 
+.context-chip.ready {
+  border-color: rgba(20, 217, 255, 0.32);
+  background:
+    linear-gradient(180deg, rgba(20, 91, 112, 0.42), rgba(10, 22, 30, 0.88)),
+    #0d151b;
+}
+
+.context-chip.ready span,
+.context-chip.ready strong {
+  color: #d8f8ff;
+}
+
 .context-chip.pending {
   border-color: rgba(242, 193, 78, 0.3);
   background:
