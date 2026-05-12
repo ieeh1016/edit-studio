@@ -34,7 +34,7 @@ import {
   ZoomIn,
   ZoomOut
 } from 'lucide-react';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   CSSProperties,
   KeyboardEvent as ReactKeyboardEvent,
@@ -499,6 +499,7 @@ export function App() {
   const audioPreviewRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const audioUrlsRef = useRef<AudioUrlMap>({});
   const mediaUrlsRef = useRef<MediaUrlMap>({});
+  const autosaveProjectRef = useRef<ProjectFile | null>(null);
   const videoCacheVersionRef = useRef(0);
   const thumbnailCacheRef = useRef<Map<number, TimelineThumbnail>>(new Map());
   const thumbnailVideoUrlRef = useRef<string | null>(null);
@@ -845,16 +846,36 @@ export function App() {
     localStorage.setItem(PREVIEW_SIZE_KEY, previewSize);
   }, [previewSize]);
 
+  useLayoutEffect(() => {
+    autosaveProjectRef.current = createAutosaveProject();
+  });
+
   useEffect(() => {
+    const flushAutosaveBeforeUnload = () => {
+      writeAutosaveProject(autosaveProjectRef.current, {
+        touchUpdatedAt: true,
+        updateState: false
+      });
+    };
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      flushAutosaveBeforeUnload();
       if (!shouldWarnBeforeUnload) return;
 
       event.preventDefault();
       event.returnValue = '';
     };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushAutosaveBeforeUnload();
+    };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', flushAutosaveBeforeUnload);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', flushAutosaveBeforeUnload);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [shouldWarnBeforeUnload]);
 
   useEffect(() => {
@@ -2415,6 +2436,61 @@ export function App() {
     setStatus('프로젝트 JSON 저장 완료');
   }
 
+  function createAutosaveProject(updatedAt = new Date().toISOString()): ProjectFile | null {
+    if (
+      cues.length === 0 &&
+      overlays.length === 0 &&
+      effects.length === 0 &&
+      videoClips.length === 0 &&
+      imageClips.length === 0 &&
+      audioClips.length === 0
+    ) {
+      return null;
+    }
+
+    return {
+      version: 1,
+      videoName: videoFile?.name ?? restoredVideoName ?? undefined,
+      mediaMeta: mediaMeta ?? undefined,
+      cues,
+      overlays,
+      effects,
+      videoClips,
+      mediaSources,
+      imageClips,
+      transitions,
+      audioSources,
+      audioClips,
+      keyframes,
+      canvasSettings,
+      createdAt: projectCreatedAt,
+      updatedAt
+    };
+  }
+
+  function writeAutosaveProject(
+    project: ProjectFile | null,
+    options: { touchUpdatedAt?: boolean; updateState?: boolean } = {}
+  ) {
+    if (!project) return;
+
+    const nextProject = options.touchUpdatedAt
+      ? { ...project, updatedAt: new Date().toISOString() }
+      : project;
+
+    try {
+      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(nextProject));
+      autosaveProjectRef.current = nextProject;
+      if (options.updateState !== false) {
+        setLastAutosavedAt(nextProject.updatedAt);
+      }
+    } catch {
+      if (options.updateState !== false) {
+        setStatus('브라우저 저장공간 제한으로 자동 저장하지 못했습니다.');
+      }
+    }
+  }
+
   function exportSrt() {
     downloadText(cuesToSrt(cues), 'captions.srt', 'text/plain;charset=utf-8');
     setStatus('SRT 내보내기 완료');
@@ -2972,40 +3048,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (
-      cues.length === 0 &&
-      overlays.length === 0 &&
-      effects.length === 0 &&
-      videoClips.length === 0 &&
-      imageClips.length === 0 &&
-      audioClips.length === 0
-    ) {
+    const project = createAutosaveProject();
+    autosaveProjectRef.current = project;
+
+    if (!project) {
       return;
     }
 
     const timer = window.setTimeout(() => {
-      const now = new Date().toISOString();
-      const project: ProjectFile = {
-        version: 1,
-        videoName: videoFile?.name ?? restoredVideoName ?? undefined,
-        mediaMeta: mediaMeta ?? undefined,
-        cues,
-        overlays,
-        effects,
-        videoClips,
-        mediaSources,
-        imageClips,
-        transitions,
-        audioSources,
-        audioClips,
-        keyframes,
-        canvasSettings,
-        createdAt: projectCreatedAt,
-        updatedAt: now
-      };
-
-      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(project));
-      setLastAutosavedAt(now);
+      writeAutosaveProject(project);
     }, 500);
 
     return () => window.clearTimeout(timer);
