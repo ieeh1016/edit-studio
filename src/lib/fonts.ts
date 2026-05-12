@@ -74,11 +74,12 @@ export async function getFontMetadataFromFile(file: File) {
     names.preferredFamily ?? names.family ?? names.fullName ?? stripFontExtension(file.name);
   const inferred = inferFontVariantFromName(`${file.name} ${rawFamily}`);
   const family = normalizeFontFamilyName(rawFamily);
-  const exportFamily = normalizeSfntName(names.preferredFamily ?? names.family ?? rawFamily) ?? family;
+  const exportFamily =
+    normalizeSfntName(names.family ?? names.preferredFamily ?? names.fullName ?? rawFamily) ?? family;
   const exportFamilyCandidates = uniqueFontNames([
     exportFamily,
-    names.preferredFamily,
     names.family,
+    names.preferredFamily,
     names.fullName,
     names.postScriptName,
     rawFamily,
