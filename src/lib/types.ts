@@ -1,5 +1,6 @@
 export type CaptionPosition = 'bottom' | 'middle' | 'top';
 export type TextAlign = 'left' | 'center' | 'right';
+export type TextWrapMode = 'auto' | 'manual';
 export type ExportPreset = 'fast720' | 'hd1080' | 'source' | 'shorts1080' | 'custom';
 export type ExportFitMode = 'cover' | 'contain' | 'stretch';
 export type AudioSourceKind = 'music' | 'effect';
@@ -73,6 +74,8 @@ export interface TextOverlay {
   align: TextAlign;
   scaleX: number;
   scaleY: number;
+  boxWidth?: number;
+  wrapMode?: TextWrapMode;
   color: string;
   background: string;
   outlineColor: string;
@@ -259,6 +262,8 @@ export const defaultTextOverlay: Omit<TextOverlay, 'id' | 'start' | 'end'> = {
   align: 'center',
   scaleX: 1,
   scaleY: 1,
+  boxWidth: 56,
+  wrapMode: 'auto',
   color: '#ffffff',
   background: 'rgba(16, 18, 22, 0.4)',
   outlineColor: '#101216',

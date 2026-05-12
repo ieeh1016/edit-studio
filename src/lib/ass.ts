@@ -13,6 +13,7 @@ import { secondsToAssTimestamp } from './time';
 import { sortCues } from './subtitle';
 import { getEffectExportGlyph } from './effect-rendering';
 import { containsHangul } from './fonts';
+import { wrapTextForRender } from './text-wrap';
 
 interface AssBuildOptions {
   availableFontFamilies?: Iterable<string>;
@@ -135,6 +136,13 @@ function overlayToDialogue(
   const scaleX = clamp(overlay.scaleX ?? 1, 0.25, 4);
   const scaleY = clamp(overlay.scaleY ?? 1, 0.25, 4);
   const fontWeight = normalizeAssFontWeight(overlay.fontWeight ?? 400);
+  const wrappedText = wrapTextForRender(overlay.text.trim(), {
+    wrapMode: overlay.wrapMode,
+    boxWidth: overlay.boxWidth,
+    canvasWidth: dimensions.width,
+    fontSize: overlay.fontSize,
+    scaleX
+  });
   const tags = [
     `\\an${getOverlayAlignment(overlay.align ?? 'center')}`,
     `\\pos(${x},${y})`,
@@ -161,7 +169,7 @@ function overlayToDialogue(
   return `Dialogue: 1,${secondsToAssTimestamp(
     overlay.start
   )},${secondsToAssTimestamp(overlay.end)},Overlay,,0,0,0,,{${tags}}${escapeAssText(
-    overlay.text.trim()
+    wrappedText
   )}`;
 }
 

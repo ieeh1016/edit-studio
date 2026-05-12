@@ -80,6 +80,7 @@ import { normalizeProjectFile } from './lib/project';
 import { createKeyframe, getKeyframedValue } from './lib/keyframes';
 import { getEffectExportGlyph } from './lib/effect-rendering';
 import { shiftTimedItemsToRenderWindow } from './lib/render-window';
+import { wrapTextForRender } from './lib/text-wrap';
 import {
   createAudioClip,
   createAudioSourceMeta,
@@ -140,6 +141,7 @@ import {
   type ProjectMediaMeta,
   type ProjectFile,
   type TextAlign,
+  type TextWrapMode,
   type TextOverlay,
   type VideoClip,
   type VideoDimensions
@@ -3768,6 +3770,7 @@ export function App() {
                     <TextPreview
                       key={overlay.id}
                       overlay={overlay}
+                      outputDimensions={outputDimensions}
                       selected={selection?.kind === 'overlay' && selection.id === overlay.id}
                       onSelect={() => {
                         setSelection({ kind: 'overlay', id: overlay.id });
@@ -3780,6 +3783,13 @@ export function App() {
                           overlay.id,
                           { scaleX, scaleY },
                           `overlay-scale:${overlay.id}`
+                        )
+                      }
+                      onBoxWidthChange={(boxWidth) =>
+                        updateOverlay(
+                          overlay.id,
+                          { boxWidth },
+                          `overlay-box-width:${overlay.id}`
                         )
                       }
                       onTextChange={(text, groupKey) =>
@@ -4631,19 +4641,23 @@ const textResizeHandles: TextResizeHandle[] = [
 
 function TextPreview({
   overlay,
+  outputDimensions,
   selected,
   onSelect,
   onMove,
   onMoveEnd,
   onResize,
+  onBoxWidthChange,
   onTextChange
 }: {
   overlay: TextOverlay;
+  outputDimensions: VideoDimensions;
   selected: boolean;
   onSelect: () => void;
   onMove: (x: number, y: number) => void;
   onMoveEnd: () => void;
   onResize: (scaleX: number, scaleY: number) => void;
+  onBoxWidthChange: (boxWidth: number) => void;
   onTextChange: (text: string, groupKey?: string) => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
@@ -4657,17 +4671,27 @@ function TextPreview({
     handle: TextResizeHandle;
     scaleX: number;
     scaleY: number;
+    boxWidth: number;
     width: number;
     height: number;
+    boundsWidth: number;
     x: number;
     y: number;
   } | null>(null);
 
   const scaleX = clamp(overlay.scaleX ?? 1, 0.25, 4);
   const scaleY = clamp(overlay.scaleY ?? 1, 0.25, 4);
+  const boxWidth = clamp(overlay.boxWidth ?? defaultTextOverlay.boxWidth ?? 56, 12, 95);
   const align = overlay.align ?? defaultTextOverlay.align;
   const anchorTranslateX = align === 'left' ? '0%' : align === 'right' ? '-100%' : '-50%';
   const transformOriginX = align === 'left' ? 'left' : align === 'right' ? 'right' : 'center';
+  const renderedText = wrapTextForRender(overlay.text || '텍스트 입력', {
+    wrapMode: overlay.wrapMode,
+    boxWidth,
+    canvasWidth: outputDimensions.width,
+    fontSize: overlay.fontSize,
+    scaleX
+  });
 
   function startEditing() {
     onSelect();
@@ -4719,13 +4743,15 @@ function TextPreview({
     const deltaY = event.clientY - start.y;
     let nextScaleX = start.scaleX;
     let nextScaleY = start.scaleY;
+    let nextBoxWidth = start.boxWidth;
 
     if (start.handle.includes('left') || start.handle.includes('right')) {
       const outwardDelta = start.handle.includes('left') ? -deltaX : deltaX;
-      nextScaleX = clamp(
-        start.scaleX * ((Math.max(1, start.width) + outwardDelta * 2) / Math.max(1, start.width)),
-        0.25,
-        4
+      const anchorMultiplier = align === 'center' ? 2 : 1;
+      nextBoxWidth = clamp(
+        start.boxWidth + (outwardDelta * anchorMultiplier * 100) / Math.max(1, start.boundsWidth),
+        12,
+        95
       );
     }
 
@@ -4738,7 +4764,10 @@ function TextPreview({
       );
     }
 
-    onResize(nextScaleX, nextScaleY);
+    if (nextScaleX !== start.scaleX || nextScaleY !== start.scaleY) {
+      onResize(nextScaleX, nextScaleY);
+    }
+    if (nextBoxWidth !== start.boxWidth) onBoxWidthChange(nextBoxWidth);
   }
 
   return (
@@ -4760,6 +4789,8 @@ function TextPreview({
         color: overlay.color,
         background: overlay.background,
         fontSize: overlay.fontSize,
+        width: `${boxWidth}%`,
+        boxSizing: 'border-box',
         transformOrigin: `${transformOriginX} center`,
         '--text-anchor-x': anchorTranslateX,
         '--text-scale-x': scaleX,
@@ -4825,7 +4856,7 @@ function TextPreview({
         />
       ) : (
         <>
-          {overlay.text || '텍스트 입력'}
+          <span className="text-preview-render">{renderedText}</span>
           {selected && <span className="preview-edit-hint">더블클릭 편집</span>}
         </>
       )}
@@ -4847,8 +4878,13 @@ function TextPreview({
                   handle,
                   scaleX,
                   scaleY,
+                  boxWidth,
                   width: box?.width ?? 1,
                   height: box?.height ?? 1,
+                  boundsWidth:
+                    event.currentTarget
+                      .closest<HTMLElement>('.overlay-layer')
+                      ?.getBoundingClientRect().width ?? box?.width ?? 1,
                   x: event.clientX,
                   y: event.clientY
                 };
@@ -8416,6 +8452,38 @@ function OverlayPanel({
                 )
               }
             />
+          </div>
+          <div className="field-grid two">
+            <NumberField
+              label="박스 폭"
+              value={selectedOverlay.boxWidth ?? defaultTextOverlay.boxWidth ?? 56}
+              min={12}
+              max={95}
+              step={1}
+              onChange={(value) =>
+                onUpdate(
+                  selectedOverlay.id,
+                  { boxWidth: clamp(value, 12, 95) },
+                  `overlay-box-width:${selectedOverlay.id}`
+                )
+              }
+            />
+            <label>
+              줄바꿈
+              <select
+                value={selectedOverlay.wrapMode ?? defaultTextOverlay.wrapMode ?? 'auto'}
+                onChange={(event) =>
+                  onUpdate(
+                    selectedOverlay.id,
+                    { wrapMode: event.target.value as TextWrapMode },
+                    `overlay-wrap-mode:${selectedOverlay.id}`
+                  )
+                }
+              >
+                <option value="auto">자동</option>
+                <option value="manual">수동</option>
+              </select>
+            </label>
           </div>
           <section className="text-style-presets" aria-label="텍스트 스타일 프리셋">
             <div className="section-label">

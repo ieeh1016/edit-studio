@@ -414,7 +414,7 @@ select:focus-visible {
   --text-handle-scale-x: 1;
   --text-handle-scale-y: 1;
   position: absolute;
-  max-width: 76%;
+  max-width: 95%;
   padding: 7px 12px;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -432,6 +432,12 @@ select:focus-visible {
     filter 150ms ease;
   transform-origin: center;
   transform: translate(var(--text-anchor-x), -50%) scale(var(--text-scale-x), var(--text-scale-y));
+  white-space: pre-wrap;
+}
+
+.text-preview-render {
+  display: block;
+  width: 100%;
   white-space: pre-wrap;
 }
 
@@ -476,8 +482,8 @@ select:focus-visible {
 }
 
 .text-preview .preview-inline-input {
-  width: min(42vw, 520px);
-  min-width: 180px;
+  width: 100%;
+  min-width: 0;
 }
 
 .preview-edit-hint {

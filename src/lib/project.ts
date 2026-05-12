@@ -28,6 +28,7 @@ import {
   type ProjectMediaMeta,
   type ProjectFile,
   type TextAlign,
+  type TextWrapMode,
   type TextOverlay,
   type VideoClip,
   primaryVideoSourceId
@@ -68,6 +69,7 @@ const keyframeEasings = new Set<KeyframeEasing>([
 ]);
 const positions = new Set<CaptionPosition>(['bottom', 'middle', 'top']);
 const alignments = new Set<TextAlign>(['left', 'center', 'right']);
+const textWrapModes = new Set<TextWrapMode>(['auto', 'manual']);
 const transitionKinds = new Set<ClipTransitionKind>([
   'fade',
   'slideleft',
@@ -261,6 +263,10 @@ function normalizeOverlay(input: unknown): TextOverlay | null {
       : defaultTextOverlay.align,
     scaleX: clamp(finiteNumber(input.scaleX, defaultTextOverlay.scaleX), 0.25, 4),
     scaleY: clamp(finiteNumber(input.scaleY, defaultTextOverlay.scaleY), 0.25, 4),
+    boxWidth: clamp(finiteNumber(input.boxWidth, defaultTextOverlay.boxWidth ?? 56), 12, 95),
+    wrapMode: textWrapModes.has(input.wrapMode as TextWrapMode)
+      ? (input.wrapMode as TextWrapMode)
+      : defaultTextOverlay.wrapMode,
     color: colorOr(input.color, defaultTextOverlay.color),
     background: cssColorOr(input.background, defaultTextOverlay.background),
     outlineColor: colorOr(input.outlineColor, defaultTextOverlay.outlineColor),

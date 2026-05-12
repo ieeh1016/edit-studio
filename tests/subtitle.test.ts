@@ -19,6 +19,7 @@ import {
 } from '../src/lib/history';
 import { normalizeProjectFile } from '../src/lib/project';
 import { shiftTimedItemsToRenderWindow } from '../src/lib/render-window';
+import { wrapTextForRender } from '../src/lib/text-wrap';
 import {
   buildAtempoChain,
   createOrUpdateTransition,
@@ -124,6 +125,18 @@ describe('ASS export helpers', () => {
     expect(hexToAssColor('rgba(18, 52, 86, 0.5)')).toBe('&H80563412&');
   });
 
+  it('wraps overlay text with the same render-window helper used by export', () => {
+    const wrapped = wrapTextForRender('가나다라마바사아자차카타파하', {
+      wrapMode: 'auto',
+      boxWidth: 20,
+      canvasWidth: 400,
+      fontSize: 40,
+      scaleX: 1
+    });
+
+    expect(wrapped.split('\n').length).toBeGreaterThan(1);
+  });
+
   it('builds an ASS document with Korean text and overlay events', () => {
     const cues = parseSrt(`1
 00:00:01,000 --> 00:00:02,000
@@ -217,6 +230,40 @@ describe('ASS export helpers', () => {
 
     expect(script).toContain('\\fnAppleGothic');
     expect(script).not.toContain('Missing Imported Font');
+  });
+
+  it('emits explicit ASS newlines for auto-wrapped overlay text', () => {
+    const script = buildAssScript(
+      [],
+      [
+        {
+          id: 'text-1',
+          start: 0,
+          end: 2,
+          text: '가나다라마바사아자차카타파하',
+          x: 50,
+          y: 50,
+          fontFamily: 'AppleGothicLocal',
+          fontSize: 40,
+          fontWeight: 700,
+          italic: false,
+          underline: false,
+          align: 'center',
+          scaleX: 1,
+          scaleY: 1,
+          boxWidth: 20,
+          wrapMode: 'auto',
+          color: '#ffffff',
+          background: 'rgba(0, 0, 0, 0)',
+          outlineColor: '#000000',
+          outlineWidth: 1,
+          shadow: false
+        }
+      ],
+      { width: 400, height: 300 }
+    );
+
+    expect(script).toContain('\\N');
   });
 
   it('uses the exported internal font family when an imported font is available', () => {
@@ -457,6 +504,8 @@ describe('project file normalization', () => {
     expect(project.overlays[0].align).toBe('center');
     expect(project.overlays[0].scaleX).toBe(1);
     expect(project.overlays[0].scaleY).toBe(1);
+    expect(project.overlays[0].boxWidth).toBe(56);
+    expect(project.overlays[0].wrapMode).toBe('auto');
     expect(project.effects[0].kind).toBe('tap');
     expect(project.effects[0].x).toBe(0);
     expect(project.effects[0].y).toBe(100);
