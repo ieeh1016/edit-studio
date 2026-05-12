@@ -260,6 +260,10 @@ type AutosaveVideoRecord = {
   file: File;
   savedAt: string;
 };
+type SavedFontRecord = {
+  file: File;
+  savedAt: string;
+};
 type ExportPhase =
   | 'idle'
   | 'engine'
@@ -291,6 +295,8 @@ const AUTOSAVE_KEY = 'local-caption-studio:auto-save:v1';
 const AUTOSAVE_VIDEO_DB_NAME = 'edit-studio:auto-save-video:v1';
 const AUTOSAVE_VIDEO_STORE_NAME = 'media';
 const AUTOSAVE_VIDEO_KEY = 'current-video';
+const SAVED_FONT_DB_NAME = 'edit-studio:saved-fonts:v1';
+const SAVED_FONT_STORE_NAME = 'fonts';
 const ONBOARDING_KEY = 'edit-studio:onboarding-complete:v1';
 const PREVIEW_SIZE_KEY = 'edit-studio:preview-size:v1';
 const HISTORY_GROUP_WINDOW_MS = 900;
@@ -572,6 +578,21 @@ export function App() {
   useEffect(() => {
     mediaUrlsRef.current = mediaUrls;
   }, [mediaUrls]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void readSavedFontFiles()
+      .then((files) => {
+        if (cancelled || files.length === 0) return;
+        void importFontFiles(files, { applyToSelection: false, persist: false });
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -980,9 +1001,6 @@ export function App() {
     options: { preserveProject: boolean; statusMessage: string }
   ) {
     resetExportState();
-    if (!options.preserveProject) {
-      resetImportedFonts();
-    }
     setVideoFile(file);
     if (videoUrl) URL.revokeObjectURL(videoUrl);
     setVideoUrl(URL.createObjectURL(file));
@@ -1036,6 +1054,13 @@ export function App() {
   }
 
   async function importFonts(files: File[]) {
+    await importFontFiles(files, { applyToSelection: true, persist: true });
+  }
+
+  async function importFontFiles(
+    files: File[],
+    options: { applyToSelection: boolean; persist: boolean }
+  ) {
     const supportedFiles = files.filter(isSupportedFontFile);
     if (supportedFiles.length === 0) {
       setStatus('TTF 또는 OTF 폰트 파일만 가져올 수 있습니다.');
@@ -1083,12 +1108,12 @@ export function App() {
 
     const preferredFont = choosePreferredImportedFont(imported);
 
-    if (selectedCue) {
+    if (options.applyToSelection && selectedCue) {
       updateCueStyle(selectedCue.id, {
         fontFamily: preferredFont.family,
         fontWeight: preferredFont.weight
       });
-    } else if (selectedOverlay) {
+    } else if (options.applyToSelection && selectedOverlay) {
       updateOverlay(selectedOverlay.id, {
         fontFamily: preferredFont.family,
         fontWeight: preferredFont.weight,
@@ -1096,11 +1121,21 @@ export function App() {
       });
     }
 
+    if (options.persist) {
+      void saveImportedFontFiles(imported).catch(() => {
+        setStatus(
+          `폰트 ${imported.length}개 가져옴. 단, 브라우저 저장공간 제한으로 다음 방문 자동 복구는 어려울 수 있습니다.`
+        );
+      });
+    }
+
     const familyCount = new Set(imported.map((font) => font.family)).size;
     setStatus(
       failedCount > 0
         ? `폰트 ${imported.length}개 가져옴, ${failedCount}개 실패`
-        : `폰트 ${imported.length}개 가져옴 · ${familyCount}개 패밀리`
+        : options.persist
+          ? `폰트 ${imported.length}개 가져옴 · ${familyCount}개 패밀리 · 로컬 저장 완료`
+          : `저장된 폰트 ${imported.length}개 복구 · ${familyCount}개 패밀리`
     );
   }
 
@@ -1409,7 +1444,6 @@ export function App() {
 
   function resetProjectState() {
     resetExportState();
-    resetImportedFonts();
     if (videoRef.current) {
       videoRef.current.pause();
       videoRef.current.removeAttribute('src');
@@ -2393,7 +2427,9 @@ export function App() {
 
   function exportAss() {
     downloadText(
-      buildAssScript(cues, overlays, outputDimensions, effects),
+      buildAssScript(cues, overlays, outputDimensions, effects, {
+        availableFontFamilies: getAvailableExportFontFamilies(fontAssets)
+      }),
       'captions.ass',
       'text/plain;charset=utf-8'
     );
@@ -2449,10 +2485,18 @@ export function App() {
         fileSize: videoFile.size
       });
       const missingAudioCount = jobAudioClips.filter((clip) => !audioFiles[clip.sourceId]).length;
+      const missingFontFamilies = getMissingExportFontFamilies(jobCues, jobOverlays, fontAssets);
       const preflightMessages = [
         ...preflight.messages,
         ...(missingAudioCount > 0
           ? [`재연결되지 않은 오디오 ${missingAudioCount}개는 제외됩니다.`]
+          : []),
+        ...(missingFontFamilies.length > 0
+          ? [
+              `현재 세션에 없는 폰트 ${missingFontFamilies.join(
+                ', '
+              )}은 기본 폰트로 렌더합니다.`
+            ]
           : [])
       ];
       setExportPreflightNote(formatExportPreflightNote(preflightMessages, preflight.risk));
@@ -2480,6 +2524,7 @@ export function App() {
           fontFiles: fontAssets
             .map((asset) => asset.file)
             .filter((file): file is File => Boolean(file)),
+          availableFontFamilies: getAvailableExportFontFamilies(fontAssets),
           signal: controller.signal,
           onProgress: setExportProgress,
           onStatus: (message) => {
@@ -9516,6 +9561,32 @@ function mergeFontAssets(previous: AppFontAsset[], imported: AppFontAsset[]) {
   return next;
 }
 
+function getAvailableExportFontFamilies(fonts: AppFontAsset[]) {
+  return Array.from(
+    new Set(
+      fonts
+        .filter((font) => font.source === 'builtin' || Boolean(font.file))
+        .flatMap((font) => [font.family, font.exportFamily])
+    )
+  );
+}
+
+function getMissingExportFontFamilies(
+  cues: CaptionCue[],
+  overlays: TextOverlay[],
+  fonts: AppFontAsset[]
+) {
+  const availableFamilies = new Set(getAvailableExportFontFamilies(fonts));
+  const requestedFamilies = new Set<string>();
+
+  cues.forEach((cue) => requestedFamilies.add(cue.style.fontFamily));
+  overlays.forEach((overlay) => requestedFamilies.add(overlay.fontFamily));
+
+  return Array.from(requestedFamilies)
+    .filter((family) => family && !availableFamilies.has(family))
+    .sort((a, b) => a.localeCompare(b));
+}
+
 function choosePreferredImportedFont(imported: AppFontAsset[]) {
   return (
     imported.find((font) => font.weight === 400 && font.style === 'normal') ??
@@ -9734,6 +9805,52 @@ async function clearAutosaveVideoFile() {
   }
 }
 
+async function saveImportedFontFiles(fonts: AppFontAsset[]) {
+  const files = fonts.filter((font): font is AppFontAsset & { file: File } =>
+    Boolean(font.file)
+  );
+  if (files.length === 0) return;
+
+  const db = await openSavedFontDb();
+
+  try {
+    const transaction = db.transaction(SAVED_FONT_STORE_NAME, 'readwrite');
+    const store = transaction.objectStore(SAVED_FONT_STORE_NAME);
+    const done = idbTransactionDone(transaction);
+    const savedAt = new Date().toISOString();
+
+    await Promise.all(
+      files.map((font) => {
+        const record: SavedFontRecord = { file: font.file, savedAt };
+        return idbRequest(store.put(record, getSavedFontKey(font)));
+      })
+    );
+    await done;
+  } finally {
+    db.close();
+  }
+}
+
+async function readSavedFontFiles() {
+  const db = await openSavedFontDb();
+
+  try {
+    const transaction = db.transaction(SAVED_FONT_STORE_NAME, 'readonly');
+    const store = transaction.objectStore(SAVED_FONT_STORE_NAME);
+    const values = await idbRequest<unknown[]>(store.getAll());
+
+    return values
+      .map((value) => {
+        if (value instanceof File) return value;
+        if (isSavedFontRecord(value)) return value.file;
+        return null;
+      })
+      .filter((file): file is File => file instanceof File && isSupportedFontFile(file));
+  } finally {
+    db.close();
+  }
+}
+
 function openAutosaveVideoDb(): Promise<IDBDatabase> {
   if (typeof indexedDB === 'undefined') {
     return Promise.reject(new Error('IndexedDB를 사용할 수 없습니다.'));
@@ -9754,6 +9871,30 @@ function openAutosaveVideoDb(): Promise<IDBDatabase> {
   });
 }
 
+function openSavedFontDb(): Promise<IDBDatabase> {
+  if (typeof indexedDB === 'undefined') {
+    return Promise.reject(new Error('IndexedDB를 사용할 수 없습니다.'));
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(SAVED_FONT_DB_NAME, 1);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SAVED_FONT_STORE_NAME)) {
+        db.createObjectStore(SAVED_FONT_STORE_NAME);
+      }
+    };
+
+    request.onerror = () => reject(request.error ?? new Error('폰트 저장 DB를 열지 못했습니다.'));
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+function getSavedFontKey(font: AppFontAsset) {
+  return `${font.family}::${font.weight}::${font.style}`;
+}
+
 function idbRequest<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onerror = () => reject(request.error ?? new Error('IndexedDB 요청에 실패했습니다.'));
@@ -9772,6 +9913,15 @@ function idbTransactionDone(transaction: IDBTransaction): Promise<void> {
 }
 
 function isAutosaveVideoRecord(value: unknown): value is AutosaveVideoRecord {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'file' in value &&
+    (value as { file?: unknown }).file instanceof File
+  );
+}
+
+function isSavedFontRecord(value: unknown): value is SavedFontRecord {
   return (
     typeof value === 'object' &&
     value !== null &&

@@ -38,6 +38,7 @@ interface ExportOptions {
   imageClips?: ImageClip[];
   imageFiles?: Record<string, File>;
   fontFiles?: File[];
+  availableFontFamilies?: string[];
   signal?: AbortSignal;
   onProgress?: (progress: number) => void;
   onLog?: (message: string) => void;
@@ -82,7 +83,9 @@ export async function exportVideoWithBurnedSubtitles(
     options.preset,
     options.customDimensions
   );
-  const assScript = buildAssScript(cues, overlays, outputDimensions, effects);
+  const assScript = buildAssScript(cues, overlays, outputDimensions, effects, {
+    availableFontFamilies: options.availableFontFamilies
+  });
   const clips =
     videoClips.length > 0
       ? videoClips

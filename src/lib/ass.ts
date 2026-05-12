@@ -12,19 +12,29 @@ import {
 import { secondsToAssTimestamp } from './time';
 import { sortCues } from './subtitle';
 
+interface AssBuildOptions {
+  availableFontFamilies?: Iterable<string>;
+}
+
 export function buildAssScript(
   cues: CaptionCue[],
   overlays: TextOverlay[],
   dimensions: VideoDimensions,
-  effects: InteractionEffect[] = []
+  effects: InteractionEffect[] = [],
+  options: AssBuildOptions = {}
 ) {
   const playResX = Math.max(2, Math.round(dimensions.width));
   const playResY = Math.max(2, Math.round(dimensions.height));
+  const availableFontFamilies = options.availableFontFamilies
+    ? new Set(options.availableFontFamilies)
+    : null;
   const events = [
-    ...sortCues(cues).map((cue) => captionCueToDialogue(cue)),
+    ...sortCues(cues).map((cue) => captionCueToDialogue(cue, availableFontFamilies)),
     ...overlays
       .filter((overlay) => overlay.text.trim().length > 0)
-      .map((overlay) => overlayToDialogue(overlay, { width: playResX, height: playResY })),
+      .map((overlay) =>
+        overlayToDialogue(overlay, { width: playResX, height: playResY }, availableFontFamilies)
+      ),
     ...effects.map((effect) => effectToDialogue(effect, { width: playResX, height: playResY }))
   ].join('\n');
 
@@ -66,11 +76,11 @@ export function hexToAssColor(color: string, alpha?: string) {
   return `&H${resolvedAlpha}${blue}${green}${red}&`.toUpperCase();
 }
 
-function captionCueToDialogue(cue: CaptionCue) {
+function captionCueToDialogue(cue: CaptionCue, availableFontFamilies: Set<string> | null) {
   const alignment = getCaptionAlignment(cue.position, cue.style.align);
   const tags = [
     `\\an${alignment}`,
-    `\\fn${escapeAssFontName(resolveAssFontFamily(cue.style.fontFamily))}`,
+    `\\fn${escapeAssFontName(resolveAssFontFamily(cue.style.fontFamily, availableFontFamilies))}`,
     `\\fs${Math.round(cue.style.fontSize)}`,
     `\\b${normalizeAssFontWeight(cue.style.fontWeight ?? 400)}`,
     `\\c${hexToAssColor(cue.style.color)}`,
@@ -85,7 +95,11 @@ function captionCueToDialogue(cue: CaptionCue) {
   )},Default,,0,0,0,,{${tags}}${escapeAssText(cue.text.trim())}`;
 }
 
-function overlayToDialogue(overlay: TextOverlay, dimensions: VideoDimensions) {
+function overlayToDialogue(
+  overlay: TextOverlay,
+  dimensions: VideoDimensions,
+  availableFontFamilies: Set<string> | null
+) {
   const x = Math.round((overlay.x / 100) * dimensions.width);
   const y = Math.round((overlay.y / 100) * dimensions.height);
   const scaleX = clamp(overlay.scaleX ?? 1, 0.25, 4);
@@ -94,7 +108,7 @@ function overlayToDialogue(overlay: TextOverlay, dimensions: VideoDimensions) {
   const tags = [
     `\\an${getOverlayAlignment(overlay.align ?? 'center')}`,
     `\\pos(${x},${y})`,
-    `\\fn${escapeAssFontName(resolveAssFontFamily(overlay.fontFamily))}`,
+    `\\fn${escapeAssFontName(resolveAssFontFamily(overlay.fontFamily, availableFontFamilies))}`,
     `\\fs${Math.round(overlay.fontSize)}`,
     `\\b${fontWeight}`,
     `\\i${overlay.italic ? 1 : 0}`,
@@ -173,10 +187,15 @@ function getOverlayAlignment(align: TextAlign) {
   }[align];
 }
 
-function resolveAssFontFamily(fontFamily: string) {
-  return fontFamily === defaultPreviewFontFamily
-    ? defaultExportFontFamily
-    : fontFamily.trim() || defaultExportFontFamily;
+function resolveAssFontFamily(fontFamily: string, availableFontFamilies: Set<string> | null) {
+  const requested = fontFamily.trim();
+  if (requested === defaultPreviewFontFamily) return defaultExportFontFamily;
+  if (!requested) return defaultExportFontFamily;
+  if (availableFontFamilies && !availableFontFamilies.has(requested)) {
+    return defaultExportFontFamily;
+  }
+
+  return requested;
 }
 
 function escapeAssFontName(fontFamily: string) {

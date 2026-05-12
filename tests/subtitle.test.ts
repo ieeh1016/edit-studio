@@ -180,6 +180,41 @@ describe('ASS export helpers', () => {
     expect(script).toContain('\\pos(480,378)');
     expect(script).toContain('터치');
   });
+
+  it('falls back to the bundled export font when restored local fonts are missing', () => {
+    const script = buildAssScript(
+      [],
+      [
+        {
+          id: 'text-1',
+          start: 0,
+          end: 2,
+          text: '복구된 텍스트',
+          x: 50,
+          y: 50,
+          fontFamily: 'Missing Imported Font',
+          fontSize: 52,
+          fontWeight: 700,
+          italic: false,
+          underline: false,
+          align: 'center',
+          scaleX: 1,
+          scaleY: 1,
+          color: '#ffffff',
+          background: 'rgba(0, 0, 0, 0.4)',
+          outlineColor: '#000000',
+          outlineWidth: 2,
+          shadow: true
+        }
+      ],
+      { width: 1280, height: 720 },
+      [],
+      { availableFontFamilies: ['AppleGothicLocal', 'AppleGothic'] }
+    );
+
+    expect(script).toContain('\\fnAppleGothic');
+    expect(script).not.toContain('Missing Imported Font');
+  });
 });
 
 describe('project file normalization', () => {
