@@ -50,7 +50,7 @@ import {
   getExportDimensions
 } from './lib/ffmpeg';
 import { createExportPreflightResult } from './lib/export-preflight';
-import { buildAssScript } from './lib/ass';
+import { buildAssScript, type AssFontFace } from './lib/ass';
 import {
   createCue,
   cuesToSrt,
@@ -68,6 +68,7 @@ import {
 } from './lib/history';
 import {
   builtinFontAsset,
+  containsHangul,
   fontDownloadLinks,
   fontWeightOptions,
   getFontMetadataFromFile,
@@ -77,6 +78,8 @@ import {
 } from './lib/fonts';
 import { normalizeProjectFile } from './lib/project';
 import { createKeyframe, getKeyframedValue } from './lib/keyframes';
+import { getEffectExportGlyph } from './lib/effect-rendering';
+import { shiftTimedItemsToRenderWindow } from './lib/render-window';
 import {
   createAudioClip,
   createAudioSourceMeta,
@@ -1151,12 +1154,19 @@ export function App() {
     }
 
     const familyCount = new Set(imported.map((font) => font.family)).size;
+    const hangulUnsupported = imported
+      .filter((font) => font.supportsHangul === false)
+      .map((font) => font.family);
+    const hangulWarning =
+      hangulUnsupported.length > 0
+        ? ` · 한글 미지원: ${Array.from(new Set(hangulUnsupported)).join(', ')}`
+        : '';
     setStatus(
       failedCount > 0
-        ? `폰트 ${imported.length}개 가져옴, ${failedCount}개 실패`
+        ? `폰트 ${imported.length}개 가져옴, ${failedCount}개 실패${hangulWarning}`
         : options.persist
-          ? `폰트 ${imported.length}개 가져옴 · ${familyCount}개 패밀리 · 로컬 저장 완료`
-          : `저장된 폰트 ${imported.length}개 복구 · ${familyCount}개 패밀리`
+          ? `폰트 ${imported.length}개 가져옴 · ${familyCount}개 패밀리 · 로컬 저장 완료${hangulWarning}`
+          : `저장된 폰트 ${imported.length}개 복구 · ${familyCount}개 패밀리${hangulWarning}`
     );
   }
 
@@ -2504,7 +2514,8 @@ export function App() {
   function exportAss() {
     downloadText(
       buildAssScript(cues, overlays, outputDimensions, effects, {
-        availableFontFamilies: getAvailableExportFontFamilies(fontAssets)
+        availableFontFamilies: getAvailableExportFontFamilies(fontAssets),
+        fontFaces: getExportFontFaces(fontAssets)
       }),
       'captions.ass',
       'text/plain;charset=utf-8'
@@ -2562,6 +2573,11 @@ export function App() {
       });
       const missingAudioCount = jobAudioClips.filter((clip) => !audioFiles[clip.sourceId]).length;
       const missingFontFamilies = getMissingExportFontFamilies(jobCues, jobOverlays, fontAssets);
+      const unsupportedHangulFonts = getUnsupportedHangulFontFamilies(
+        jobCues,
+        jobOverlays,
+        fontAssets
+      );
       const preflightMessages = [
         ...preflight.messages,
         ...(missingAudioCount > 0
@@ -2572,6 +2588,13 @@ export function App() {
               `현재 세션에 없는 폰트 ${missingFontFamilies.join(
                 ', '
               )}은 기본 폰트로 렌더합니다.`
+            ]
+          : []),
+        ...(unsupportedHangulFonts.length > 0
+          ? [
+              `한글 글리프가 없는 폰트 ${unsupportedHangulFonts.join(
+                ', '
+              )}은 기본 한글 폰트로 렌더합니다.`
             ]
           : [])
       ];
@@ -2601,6 +2624,7 @@ export function App() {
             .map((asset) => asset.file)
             .filter((file): file is File => Boolean(file)),
           availableFontFamilies: getAvailableExportFontFamilies(fontAssets),
+          fontFaces: getExportFontFaces(fontAssets),
           signal: controller.signal,
           onProgress: setExportProgress,
           onStatus: (message) => {
@@ -3611,7 +3635,9 @@ export function App() {
             <div className="preview-viewbar">
               <div>
                 <strong>미리보기</strong>
-                <span>{dimensions.width}x{dimensions.height}</span>
+                <span>
+                  출력 {outputDimensions.width}x{outputDimensions.height}
+                </span>
               </div>
               <div className="preview-size-controls" aria-label="미리보기 크기">
                 {previewSizeOptions.map((option) => (
@@ -3627,11 +3653,17 @@ export function App() {
               </div>
             </div>
             {previewVideoUrl ? (
-              <div className="video-stage" onClick={() => void togglePlayback()}>
+              <div
+                className="video-stage"
+                style={{
+                  '--stage-aspect-ratio': `${outputDimensions.width} / ${outputDimensions.height}`
+                } as CSSProperties}
+                onClick={() => void togglePlayback()}
+              >
                 <video
                   ref={videoRef}
                   src={previewVideoUrl}
-                  style={videoPreviewTransformStyle(activePreviewClip)}
+                  style={videoPreviewTransformStyle(activePreviewClip, exportFitMode)}
                   onLoadedMetadata={(event) => {
                     const element = event.currentTarget;
                     const sourceDuration = element.duration || 0;
@@ -5007,6 +5039,7 @@ function InteractionEffectPreview({
   onMoveEnd: () => void;
   onResize: (size: number) => void;
 }) {
+  const exportGlyph = getEffectExportGlyph(effect.kind);
   const resizeStartRef = useRef<{
     centerX: number;
     centerY: number;
@@ -5054,12 +5087,15 @@ function InteractionEffectPreview({
   return (
     <button
       type="button"
-      className={`effect-preview effect-${effect.kind} ${selected ? 'selected' : ''}`}
+      className={`effect-preview effect-${effect.kind} export-parity ${
+        selected ? 'selected' : ''
+      }`}
       style={{
         left: `${effect.x}%`,
         top: `${effect.y}%`,
         '--effect-color': effect.color,
-        '--effect-size': `${effect.size}px`
+        '--effect-size': `${effect.size}px`,
+        '--effect-duration': `${Math.max(200, Math.round((effect.end - effect.start) * 1000))}ms`
       } as CSSProperties}
       title={effect.label || effectName(effect.kind)}
       onClick={(event) => {
@@ -5089,14 +5125,12 @@ function InteractionEffectPreview({
         onMoveEnd();
       }}
     >
-      {isArtworkEffect(effect.kind) && (
-        <EffectArtwork
-          key={`${effect.kind}-${replayToken}`}
-          kind={effect.kind}
-          color={effect.color}
-        />
-      )}
-      {effect.label && <span className="effect-label">{effect.label}</span>}
+      <span key={`${effect.kind}-${replayToken}`} className="effect-export-render">
+        <span className="effect-export-glyph" aria-hidden="true">
+          {exportGlyph}
+        </span>
+        {effect.label && <span className="effect-label">{effect.label}</span>}
+      </span>
       {selected && (
         <span
           className="effect-resize-handle"
@@ -9287,11 +9321,18 @@ function formatTimelineTick(seconds: number) {
   return `${minutes}:${String(wholeSeconds).padStart(2, '0')}`;
 }
 
-function videoPreviewTransformStyle(clip: VideoClip | undefined): CSSProperties {
-  if (!clip) return {};
+function videoPreviewTransformStyle(
+  clip: VideoClip | undefined,
+  fitMode: ExportFitMode
+): CSSProperties {
+  const objectFit: CSSProperties['objectFit'] =
+    fitMode === 'stretch' ? 'fill' : fitMode === 'contain' ? 'contain' : 'cover';
+
+  if (!clip) return { objectFit };
 
   const crop = clip.crop ?? defaultVideoTransform.crop;
   return {
+    objectFit,
     transform: `translate(${(clip.x ?? defaultVideoTransform.x) - 50}%, ${(clip.y ?? defaultVideoTransform.y) - 50}%) rotate(${clip.rotation ?? defaultVideoTransform.rotation}deg) scale(${clip.scale ?? defaultVideoTransform.scale})`,
     opacity: clip.opacity ?? defaultVideoTransform.opacity,
     clipPath: `inset(${crop.top}% ${crop.right}% ${crop.bottom}% ${crop.left}%)`
@@ -9617,9 +9658,25 @@ function getAvailableExportFontFamilies(fonts: AppFontAsset[]) {
     new Set(
       fonts
         .filter((font) => font.source === 'builtin' || Boolean(font.file))
-        .flatMap((font) => [font.family, font.exportFamily])
+        .flatMap((font) => [
+          font.family,
+          font.exportFamily,
+          ...(font.exportFamilyCandidates ?? [])
+        ])
     )
   );
+}
+
+function getExportFontFaces(fonts: AppFontAsset[]): AssFontFace[] {
+  return fonts
+    .filter((font) => font.source === 'builtin' || Boolean(font.file))
+    .map((font) => ({
+      family: font.family,
+      exportFamily: font.exportFamily,
+      weight: font.weight,
+      style: font.style,
+      supportsHangul: font.supportsHangul
+    }));
 }
 
 function getMissingExportFontFamilies(
@@ -9635,6 +9692,35 @@ function getMissingExportFontFamilies(
 
   return Array.from(requestedFamilies)
     .filter((family) => family && !availableFamilies.has(family))
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function getUnsupportedHangulFontFamilies(
+  cues: CaptionCue[],
+  overlays: TextOverlay[],
+  fonts: AppFontAsset[]
+) {
+  const fontsByFamily = new Map<string, AppFontAsset[]>();
+  fonts.forEach((font) => {
+    const current = fontsByFamily.get(font.family) ?? [];
+    current.push(font);
+    fontsByFamily.set(font.family, current);
+  });
+
+  const requestedFamilies = new Set<string>();
+  cues.forEach((cue) => {
+    if (containsHangul(cue.text)) requestedFamilies.add(cue.style.fontFamily);
+  });
+  overlays.forEach((overlay) => {
+    if (containsHangul(overlay.text)) requestedFamilies.add(overlay.fontFamily);
+  });
+
+  return Array.from(requestedFamilies)
+    .filter((family) => {
+      if (!family || family === builtinPreviewFontFamily) return false;
+      const faces = fontsByFamily.get(family);
+      return faces?.length ? faces.every((font) => font.supportsHangul === false) : false;
+    })
     .sort((a, b) => a.localeCompare(b));
 }
 
@@ -10055,21 +10141,7 @@ function shiftTimelineItemsToClip<T extends { start: number; end: number }>(
   rangeStart: number,
   rangeEnd: number
 ) {
-  const clipDuration = Math.max(0, rangeEnd - rangeStart);
-
-  return items
-    .filter((item) => item.start < rangeEnd && item.end > rangeStart)
-    .map((item) => {
-      const start = clamp(item.start - rangeStart, 0, clipDuration);
-      const end = clamp(Math.min(item.end, rangeEnd) - rangeStart, 0, clipDuration);
-
-      return {
-        ...item,
-        start,
-        end
-      };
-    })
-    .filter((item) => item.end - item.start >= 0.03);
+  return shiftTimedItemsToRenderWindow(items, rangeStart, rangeEnd);
 }
 
 function shiftAudioClipsToClip(

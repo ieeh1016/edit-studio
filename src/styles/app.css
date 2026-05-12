@@ -283,7 +283,7 @@ select:focus-visible {
   width: 100%;
   max-width: min(100%, var(--preview-max-width));
   margin-inline: auto;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: var(--stage-aspect-ratio, 16 / 9);
   border-radius: 6px;
   background: #111412;
   cursor: pointer;
@@ -592,6 +592,7 @@ select:focus-visible {
 .effect-preview {
   --effect-color: #22c3aa;
   --effect-size: 84px;
+  --effect-duration: 720ms;
   position: absolute;
   display: grid;
   place-items: center;
@@ -615,6 +616,40 @@ select:focus-visible {
   content: '';
   border-radius: 999px;
   pointer-events: none;
+}
+
+.effect-preview.export-parity::before,
+.effect-preview.export-parity::after {
+  display: none;
+}
+
+.effect-preview.export-parity {
+  width: var(--effect-size);
+  height: var(--effect-size);
+  color: var(--effect-color);
+  font-family: AppleGothicLocal, AppleGothic, 'Apple SD Gothic Neo', sans-serif;
+  line-height: 1;
+  transform: translate(-50%, -50%);
+}
+
+.effect-export-render {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  animation: effect-export-parity var(--effect-duration) cubic-bezier(0.18, 0.9, 0.18, 1) both;
+}
+
+.effect-export-glyph {
+  display: block;
+  color: var(--effect-color);
+  font-size: var(--effect-size);
+  font-weight: 800;
+  line-height: 1;
+  paint-order: stroke fill;
+  -webkit-text-stroke: max(1.5px, calc(var(--effect-size) * 0.025)) #fff;
+  text-shadow: 0 5px 14px rgba(0, 0, 0, 0.24);
 }
 
 .effect-preview::before {
@@ -981,6 +1016,18 @@ select:focus-visible {
   padding: 4px 7px;
   text-align: center;
   white-space: nowrap;
+}
+
+.effect-preview.export-parity .effect-label {
+  top: calc(100% + 3px);
+  background: transparent;
+  color: var(--effect-color);
+  font-size: max(11px, calc(var(--effect-size) * 0.18));
+  font-weight: 800;
+  padding: 0;
+  paint-order: stroke fill;
+  -webkit-text-stroke: 2px #fff;
+  text-shadow: 0 3px 9px rgba(0, 0, 0, 0.2);
 }
 
 .effect-resize-handle {
@@ -2682,6 +2729,18 @@ input[type='color'] {
 
   100% {
     transform: scale(0.92);
+  }
+}
+
+@keyframes effect-export-parity {
+  0% {
+    opacity: 0.97;
+    transform: scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.75);
   }
 }
 

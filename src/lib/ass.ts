@@ -11,9 +11,20 @@ import {
 } from './types';
 import { secondsToAssTimestamp } from './time';
 import { sortCues } from './subtitle';
+import { getEffectExportGlyph } from './effect-rendering';
+import { containsHangul } from './fonts';
 
 interface AssBuildOptions {
   availableFontFamilies?: Iterable<string>;
+  fontFaces?: Iterable<AssFontFace>;
+}
+
+export interface AssFontFace {
+  family: string;
+  exportFamily: string;
+  weight?: number;
+  style?: 'normal' | 'italic';
+  supportsHangul?: boolean;
 }
 
 export function buildAssScript(
@@ -28,12 +39,20 @@ export function buildAssScript(
   const availableFontFamilies = options.availableFontFamilies
     ? new Set(options.availableFontFamilies)
     : null;
+  const fontRegistry = createAssFontRegistry(options.fontFaces);
   const events = [
-    ...sortCues(cues).map((cue) => captionCueToDialogue(cue, availableFontFamilies)),
+    ...sortCues(cues).map((cue) =>
+      captionCueToDialogue(cue, availableFontFamilies, fontRegistry)
+    ),
     ...overlays
       .filter((overlay) => overlay.text.trim().length > 0)
       .map((overlay) =>
-        overlayToDialogue(overlay, { width: playResX, height: playResY }, availableFontFamilies)
+        overlayToDialogue(
+          overlay,
+          { width: playResX, height: playResY },
+          availableFontFamilies,
+          fontRegistry
+        )
       ),
     ...effects.map((effect) => effectToDialogue(effect, { width: playResX, height: playResY }))
   ].join('\n');
@@ -76,11 +95,21 @@ export function hexToAssColor(color: string, alpha?: string) {
   return `&H${resolvedAlpha}${blue}${green}${red}&`.toUpperCase();
 }
 
-function captionCueToDialogue(cue: CaptionCue, availableFontFamilies: Set<string> | null) {
+function captionCueToDialogue(
+  cue: CaptionCue,
+  availableFontFamilies: Set<string> | null,
+  fontRegistry: AssFontRegistry
+) {
   const alignment = getCaptionAlignment(cue.position, cue.style.align);
   const tags = [
     `\\an${alignment}`,
-    `\\fn${escapeAssFontName(resolveAssFontFamily(cue.style.fontFamily, availableFontFamilies))}`,
+    `\\fn${escapeAssFontName(
+      resolveAssFontFamily(cue.style.fontFamily, availableFontFamilies, fontRegistry, {
+        weight: cue.style.fontWeight ?? 400,
+        italic: false,
+        text: cue.text
+      })
+    )}`,
     `\\fs${Math.round(cue.style.fontSize)}`,
     `\\b${normalizeAssFontWeight(cue.style.fontWeight ?? 400)}`,
     `\\c${hexToAssColor(cue.style.color)}`,
@@ -98,7 +127,8 @@ function captionCueToDialogue(cue: CaptionCue, availableFontFamilies: Set<string
 function overlayToDialogue(
   overlay: TextOverlay,
   dimensions: VideoDimensions,
-  availableFontFamilies: Set<string> | null
+  availableFontFamilies: Set<string> | null,
+  fontRegistry: AssFontRegistry
 ) {
   const x = Math.round((overlay.x / 100) * dimensions.width);
   const y = Math.round((overlay.y / 100) * dimensions.height);
@@ -108,7 +138,13 @@ function overlayToDialogue(
   const tags = [
     `\\an${getOverlayAlignment(overlay.align ?? 'center')}`,
     `\\pos(${x},${y})`,
-    `\\fn${escapeAssFontName(resolveAssFontFamily(overlay.fontFamily, availableFontFamilies))}`,
+    `\\fn${escapeAssFontName(
+      resolveAssFontFamily(overlay.fontFamily, availableFontFamilies, fontRegistry, {
+        weight: overlay.fontWeight ?? 400,
+        italic: Boolean(overlay.italic),
+        text: overlay.text
+      })
+    )}`,
     `\\fs${Math.round(overlay.fontSize)}`,
     `\\b${fontWeight}`,
     `\\i${overlay.italic ? 1 : 0}`,
@@ -133,7 +169,7 @@ function effectToDialogue(effect: InteractionEffect, dimensions: VideoDimensions
   const x = Math.round((effect.x / 100) * dimensions.width);
   const y = Math.round((effect.y / 100) * dimensions.height);
   const durationMs = Math.max(200, Math.round((effect.end - effect.start) * 1000));
-  const glyph = getEffectGlyph(effect.kind);
+  const glyph = getEffectExportGlyph(effect.kind);
   const label = effect.label.trim();
   const text = label ? `${glyph}\\N${escapeAssText(label)}` : glyph;
   const tags = [
@@ -154,21 +190,6 @@ function effectToDialogue(effect: InteractionEffect, dimensions: VideoDimensions
   )},${secondsToAssTimestamp(effect.end)},Effect,,0,0,0,,{${tags}}${text}`;
 }
 
-function getEffectGlyph(kind: InteractionEffect['kind']) {
-  const glyphs: Record<InteractionEffect['kind'], string> = {
-    tap: '◎',
-    click: '◉',
-    pulse: '○',
-    spotlight: '◌',
-    swipe: '→',
-    target: '⌖',
-    cursor: '➤',
-    finger: '☝'
-  };
-
-  return glyphs[kind];
-}
-
 function getCaptionAlignment(position: CaptionCue['position'], align: TextAlign) {
   const table: Record<CaptionCue['position'], Record<TextAlign, number>> = {
     top: { left: 7, center: 8, right: 9 },
@@ -187,15 +208,76 @@ function getOverlayAlignment(align: TextAlign) {
   }[align];
 }
 
-function resolveAssFontFamily(fontFamily: string, availableFontFamilies: Set<string> | null) {
+type AssFontRegistry = Map<string, AssFontFace[]>;
+
+function createAssFontRegistry(fontFaces: Iterable<AssFontFace> | undefined): AssFontRegistry {
+  const registry: AssFontRegistry = new Map();
+
+  for (const face of fontFaces ?? []) {
+    const family = face.family.trim();
+    const exportFamily = face.exportFamily.trim();
+    if (!family || !exportFamily) continue;
+
+    const current = registry.get(family) ?? [];
+    current.push(face);
+    registry.set(family, current);
+
+    if (exportFamily !== family) {
+      const exportCurrent = registry.get(exportFamily) ?? [];
+      exportCurrent.push(face);
+      registry.set(exportFamily, exportCurrent);
+    }
+  }
+
+  return registry;
+}
+
+function resolveAssFontFamily(
+  fontFamily: string,
+  availableFontFamilies: Set<string> | null,
+  fontRegistry: AssFontRegistry,
+  options: { weight: number; italic: boolean; text: string }
+) {
   const requested = fontFamily.trim();
   if (requested === defaultPreviewFontFamily) return defaultExportFontFamily;
   if (!requested) return defaultExportFontFamily;
+
+  const registeredFaces = fontRegistry.get(requested);
+  if (registeredFaces?.length) {
+    const requiresHangul = containsHangul(options.text);
+    const hangulCapableFaces = requiresHangul
+      ? registeredFaces.filter((face) => face.supportsHangul !== false)
+      : registeredFaces;
+
+    if (requiresHangul && hangulCapableFaces.length === 0) {
+      return defaultExportFontFamily;
+    }
+
+    return chooseBestAssFontFace(hangulCapableFaces, options).exportFamily;
+  }
+
   if (availableFontFamilies && !availableFontFamilies.has(requested)) {
     return defaultExportFontFamily;
   }
 
   return requested;
+}
+
+function chooseBestAssFontFace(
+  faces: AssFontFace[],
+  options: { weight: number; italic: boolean }
+) {
+  return [...faces].sort((a, b) => {
+    const aStylePenalty = (a.style === 'italic') === options.italic ? 0 : 1000;
+    const bStylePenalty = (b.style === 'italic') === options.italic ? 0 : 1000;
+    const aWeight = a.weight ?? 400;
+    const bWeight = b.weight ?? 400;
+    return (
+      aStylePenalty +
+      Math.abs(aWeight - options.weight) -
+      (bStylePenalty + Math.abs(bWeight - options.weight))
+    );
+  })[0];
 }
 
 function escapeAssFontName(fontFamily: string) {

@@ -1,4 +1,4 @@
-import { buildAssScript } from './ass';
+import { buildAssScript, type AssFontFace } from './ass';
 import {
   primaryVideoSourceId,
   type CaptionCue,
@@ -39,6 +39,7 @@ interface ExportOptions {
   imageFiles?: Record<string, File>;
   fontFiles?: File[];
   availableFontFamilies?: string[];
+  fontFaces?: AssFontFace[];
   signal?: AbortSignal;
   onProgress?: (progress: number) => void;
   onLog?: (message: string) => void;
@@ -84,7 +85,8 @@ export async function exportVideoWithBurnedSubtitles(
     options.customDimensions
   );
   const assScript = buildAssScript(cues, overlays, outputDimensions, effects, {
-    availableFontFamilies: options.availableFontFamilies
+    availableFontFamilies: options.availableFontFamilies,
+    fontFaces: options.fontFaces
   });
   const clips =
     videoClips.length > 0

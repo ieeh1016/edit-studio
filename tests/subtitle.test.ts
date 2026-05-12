@@ -10,6 +10,7 @@ import { createExportPreflightResult } from '../src/lib/export-preflight';
 import { inferFontVariantFromName } from '../src/lib/fonts';
 import { createKeyframe, getKeyframedValue } from '../src/lib/keyframes';
 import { buildVideoEditFilterGraph, getExportDimensions } from '../src/lib/ffmpeg';
+import { getEffectExportGlyph } from '../src/lib/effect-rendering';
 import {
   commitEditorHistory,
   createEditorHistory,
@@ -17,6 +18,7 @@ import {
   undoEditorHistory
 } from '../src/lib/history';
 import { normalizeProjectFile } from '../src/lib/project';
+import { shiftTimedItemsToRenderWindow } from '../src/lib/render-window';
 import {
   buildAtempoChain,
   createOrUpdateTransition,
@@ -178,6 +180,7 @@ describe('ASS export helpers', () => {
     expect(script).toContain('\\fscx125');
     expect(script).toContain('\\fscy80');
     expect(script).toContain('\\pos(480,378)');
+    expect(script).toContain(getEffectExportGlyph('tap'));
     expect(script).toContain('터치');
   });
 
@@ -214,6 +217,117 @@ describe('ASS export helpers', () => {
 
     expect(script).toContain('\\fnAppleGothic');
     expect(script).not.toContain('Missing Imported Font');
+  });
+
+  it('uses the exported internal font family when an imported font is available', () => {
+    const script = buildAssScript(
+      [],
+      [
+        {
+          id: 'text-1',
+          start: 0,
+          end: 2,
+          text: 'Custom Font',
+          x: 50,
+          y: 50,
+          fontFamily: 'Preview Alias',
+          fontSize: 48,
+          fontWeight: 700,
+          italic: false,
+          underline: false,
+          align: 'center',
+          scaleX: 1,
+          scaleY: 1,
+          color: '#ffffff',
+          background: 'rgba(0, 0, 0, 0)',
+          outlineColor: '#000000',
+          outlineWidth: 1,
+          shadow: false
+        }
+      ],
+      { width: 1280, height: 720 },
+      [],
+      {
+        fontFaces: [
+          {
+            family: 'Preview Alias',
+            exportFamily: 'Internal Font Family',
+            weight: 700,
+            style: 'normal',
+            supportsHangul: true
+          }
+        ]
+      }
+    );
+
+    expect(script).toContain('\\fnInternal Font Family');
+  });
+
+  it('falls back to the bundled Korean font when the selected imported font lacks Hangul', () => {
+    const script = buildAssScript(
+      [],
+      [
+        {
+          id: 'text-1',
+          start: 0,
+          end: 2,
+          text: '한국어 텍스트',
+          x: 50,
+          y: 50,
+          fontFamily: 'Latin Only',
+          fontSize: 48,
+          fontWeight: 400,
+          italic: false,
+          underline: false,
+          align: 'center',
+          scaleX: 1,
+          scaleY: 1,
+          color: '#ffffff',
+          background: 'rgba(0, 0, 0, 0)',
+          outlineColor: '#000000',
+          outlineWidth: 1,
+          shadow: false
+        }
+      ],
+      { width: 1280, height: 720 },
+      [],
+      {
+        fontFaces: [
+          {
+            family: 'Latin Only',
+            exportFamily: 'Latin Only Internal',
+            weight: 400,
+            style: 'normal',
+            supportsHangul: false
+          }
+        ]
+      }
+    );
+
+    expect(script).toContain('\\fnAppleGothic');
+    expect(script).not.toContain('\\fnLatin Only Internal');
+  });
+});
+
+describe('render window helpers', () => {
+  it('shifts timed layers into a partial render timeline', () => {
+    const shifted = shiftTimedItemsToRenderWindow(
+      [
+        { id: 'before', start: 0, end: 1 },
+        { id: 'covering-start', start: 9, end: 12 },
+        { id: 'inside', start: 11, end: 13 },
+        { id: 'covering-end', start: 13, end: 18 },
+        { id: 'after', start: 20, end: 21 }
+      ],
+      10,
+      15
+    );
+
+    expect(shifted).toEqual([
+      { id: 'covering-start', start: 0, end: 2 },
+      { id: 'inside', start: 1, end: 3 },
+      { id: 'covering-end', start: 3, end: 5 }
+    ]);
   });
 });
 
