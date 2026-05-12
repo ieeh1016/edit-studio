@@ -372,7 +372,7 @@ const helpSections = [
   },
   {
     title: '타임라인',
-    body: '휠/트랙패드로 좌우 이동, Ctrl 또는 Cmd+휠로 커서 기준 확대/축소, Fit으로 전체 보기, 트랙 경계 드래그로 높이 조절을 할 수 있습니다. Space 재생, S 분할, I/O 구간 지정, Delete 삭제도 지원합니다.'
+    body: '휠/트랙패드로 좌우 이동, Ctrl 또는 Cmd+휠로 커서 기준 확대/축소, Fit으로 전체 보기, 트랙 경계 드래그로 높이 조절을 할 수 있습니다. Space 재생, ←/→ 1초 이동, Shift+←/→ 5초 이동, S 분할, I/O 구간 지정, Delete 삭제도 지원합니다.'
   },
   {
     title: '자막/텍스트/효과',
@@ -2627,6 +2627,21 @@ export function App() {
       return;
     }
 
+    const rangeCues = shiftTimelineItemsToClip(cues, cutRangeStart, cutRangeEnd);
+    const rangeOverlays = shiftTimelineItemsToClip(overlays, cutRangeStart, cutRangeEnd);
+    const rangeEffects = shiftTimelineItemsToClip(effects, cutRangeStart, cutRangeEnd);
+    const rangeImageClips = shiftTimelineItemsToClip(imageClips, cutRangeStart, cutRangeEnd);
+    const rangeAudioClips = shiftAudioClipsToClip(audioClips, cutRangeStart, cutRangeEnd);
+    const layerSummary = [
+      rangeCues.length > 0 ? `자막 ${rangeCues.length}` : '',
+      rangeOverlays.length > 0 ? `텍스트 ${rangeOverlays.length}` : '',
+      rangeEffects.length > 0 ? `효과 ${rangeEffects.length}` : '',
+      rangeImageClips.length > 0 ? `이미지 ${rangeImageClips.length}` : '',
+      rangeAudioClips.length > 0 ? `오디오 ${rangeAudioClips.length}` : ''
+    ]
+      .filter(Boolean)
+      .join(', ');
+
     const saveTarget = await chooseMp4SaveTargetSafely(
       `edit-studio-range-${formatClock(cutRangeStart)}-${formatClock(cutRangeEnd)}.mp4`
     );
@@ -2635,17 +2650,23 @@ export function App() {
       return;
     }
 
+    setStatus(
+      layerSummary
+        ? `구간 MP4에 ${layerSummary} 포함`
+        : '구간 MP4에 추가 레이어 없이 영상만 포함'
+    );
+
     await renderMp4Job({
       jobLabel: `구간 MP4 ${formatClock(cutRangeStart)} - ${formatClock(cutRangeEnd)}`,
       doneMessage: `${saveTarget.fileName} 다운로드 준비 완료`,
       saveTarget,
-      jobCues: shiftTimelineItemsToClip(cues, cutRangeStart, cutRangeEnd),
-      jobOverlays: shiftTimelineItemsToClip(overlays, cutRangeStart, cutRangeEnd),
-      jobEffects: shiftTimelineItemsToClip(effects, cutRangeStart, cutRangeEnd),
-      jobImageClips: shiftTimelineItemsToClip(imageClips, cutRangeStart, cutRangeEnd),
+      jobCues: rangeCues,
+      jobOverlays: rangeOverlays,
+      jobEffects: rangeEffects,
+      jobImageClips: rangeImageClips,
       jobClips: rangeExport.clips,
       jobTransitions: rangeExport.transitions,
-      jobAudioClips: shiftAudioClipsToClip(audioClips, cutRangeStart, cutRangeEnd)
+      jobAudioClips: rangeAudioClips
     });
   }
 
@@ -3058,6 +3079,13 @@ export function App() {
           moveSelectedClip(1);
           return;
         }
+      }
+
+      if (!withCommand && !event.altKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+        event.preventDefault();
+        const step = event.shiftKey ? 5 : 1;
+        seek(currentTime + (event.key === 'ArrowLeft' ? -step : step));
+        return;
       }
 
       if (withCommand || event.altKey) return;
@@ -3808,6 +3836,8 @@ export function App() {
             <span><kbd>S</kbd>분할</span>
             <span><kbd>I</kbd>IN</span>
             <span><kbd>O</kbd>OUT</span>
+            <span><kbd>←/→</kbd>1초 이동</span>
+            <span><kbd>Shift</kbd>+<kbd>←/→</kbd>5초</span>
             <span><kbd>Del</kbd>삭제</span>
             <span><kbd>Esc</kbd>해제</span>
           </div>

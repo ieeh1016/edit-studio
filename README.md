@@ -42,7 +42,7 @@ npm run dev
 - 편집 Undo/Redo
 - 브라우저 자동 저장/복구
 - 첫 방문 튜토리얼과 상단 도움말 패널, 튜토리얼 다시보기
-- 기본 단축키: Space 재생/정지, A 자막 추가, T 텍스트 추가, E 효과 추가, Delete 삭제, Cmd/Ctrl+Z 되돌리기, Cmd/Ctrl+Shift+Z 또는 Cmd/Ctrl+Y 다시 적용
+- 기본 단축키: Space 재생/정지, ←/→ 1초 이동, Shift+←/→ 5초 이동, A 자막 추가, T 텍스트 추가, E 효과 추가, Delete 삭제, Cmd/Ctrl+Z 되돌리기, Cmd/Ctrl+Shift+Z 또는 Cmd/Ctrl+Y 다시 적용
 - `ffmpeg.wasm` 기반 MP4 burn-in export
 
 ## 컷 편집 사용법
