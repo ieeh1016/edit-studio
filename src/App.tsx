@@ -499,6 +499,9 @@ export function App() {
   const lastHistoryGroupRef = useRef<{ key: string; time: number } | null>(null);
   const importedFontUrlsRef = useRef<string[]>([]);
   const playbackClockRef = useRef<number | null>(null);
+  const desiredPlaybackRef = useRef(false);
+  const intentionalPauseUntilRef = useRef(0);
+  const playRequestRef = useRef<Promise<boolean> | null>(null);
   const videoImportModeRef = useRef<VideoImportMode>('normal');
   const audioImportKindRef = useRef<AudioSourceKind>('music');
   const audioPreviewRefs = useRef<Record<string, HTMLAudioElement | null>>({});
@@ -1477,13 +1480,15 @@ export function App() {
 
   function resetProjectState() {
     resetExportState();
+    desiredPlaybackRef.current = false;
+    setIsPlaying(false);
     if (videoRef.current) {
-      videoRef.current.pause();
+      pauseMediaElement(videoRef.current);
       videoRef.current.removeAttribute('src');
       videoRef.current.load();
     }
     if (transitionVideoRef.current) {
-      transitionVideoRef.current.pause();
+      pauseMediaElement(transitionVideoRef.current);
       transitionVideoRef.current.removeAttribute('src');
       transitionVideoRef.current.load();
     }
@@ -2356,13 +2361,15 @@ export function App() {
       clearMediaRuntimeState();
       resetExportState();
       if (requiresVideoRelink) {
+        desiredPlaybackRef.current = false;
+        setIsPlaying(false);
         if (videoRef.current) {
-          videoRef.current.pause();
+          pauseMediaElement(videoRef.current);
           videoRef.current.removeAttribute('src');
           videoRef.current.load();
         }
         if (transitionVideoRef.current) {
-          transitionVideoRef.current.pause();
+          pauseMediaElement(transitionVideoRef.current);
           transitionVideoRef.current.removeAttribute('src');
           transitionVideoRef.current.load();
         }
@@ -2844,27 +2851,105 @@ export function App() {
   async function togglePlayback() {
     if (!videoRef.current) return;
 
-    if (!isPlaying) {
-      if (currentTime >= timelineDuration) {
-        seek(0);
-      }
-      setIsPlaying(true);
-      syncPreviewVideo(currentTime, true);
-      await videoRef.current.play();
-    } else {
-      videoRef.current.pause();
-      transitionVideoRef.current?.pause();
-      pauseExternalAudioPreview();
-      setIsPlaying(false);
+    if (desiredPlaybackRef.current || isPlaying) {
+      stopPreviewPlayback();
+      return;
     }
+
+    let startTime = currentTime;
+    if (startTime >= timelineDuration) {
+      startTime = 0;
+      setCurrentTime(0);
+    }
+
+    desiredPlaybackRef.current = true;
+    syncPreviewVideo(startTime, false);
+    const started = await requestMainVideoPlayback();
+    if (!started || !desiredPlaybackRef.current) return;
+
+    setIsPlaying(true);
+    syncPreviewVideo(startTime, true);
+  }
+
+  function stopPreviewPlayback() {
+    desiredPlaybackRef.current = false;
+    playbackClockRef.current = null;
+    pausePreviewMedia();
+    setIsPlaying(false);
+  }
+
+  function pausePreviewMedia() {
+    pauseMediaElement(videoRef.current);
+    pauseMediaElement(transitionVideoRef.current);
+    pauseExternalAudioPreview();
+  }
+
+  function pauseMediaElement(media: HTMLMediaElement | null | undefined) {
+    if (!media || media.paused) return;
+    intentionalPauseUntilRef.current = performance.now() + 300;
+    media.pause();
+  }
+
+  function handlePreviewPlay() {
+    if (!desiredPlaybackRef.current) {
+      pauseMediaElement(videoRef.current);
+      return;
+    }
+
+    setIsPlaying(true);
+  }
+
+  function handlePreviewPause() {
+    if (!desiredPlaybackRef.current) {
+      setIsPlaying(false);
+      return;
+    }
+
+    if (performance.now() < intentionalPauseUntilRef.current) return;
+    if (currentTime >= timelineDuration - 0.02) {
+      stopPreviewPlayback();
+      return;
+    }
+
+    void requestMainVideoPlayback();
+  }
+
+  function requestMainVideoPlayback() {
+    const video = videoRef.current;
+    if (!video || !desiredPlaybackRef.current) return Promise.resolve(false);
+    if (!video.paused) return Promise.resolve(true);
+    if (playRequestRef.current) return playRequestRef.current;
+
+    const request = video
+      .play()
+      .then(() => true)
+      .catch((error) => {
+        if (desiredPlaybackRef.current) {
+          desiredPlaybackRef.current = false;
+          pausePreviewMedia();
+          setIsPlaying(false);
+          setStatus(getPreviewPlaybackErrorMessage(error));
+        }
+
+        return false;
+      })
+      .finally(() => {
+        if (playRequestRef.current === request) {
+          playRequestRef.current = null;
+        }
+      });
+
+    playRequestRef.current = request;
+    return request;
   }
 
   function syncPreviewVideo(time: number, shouldPlay = isPlaying) {
     const sourceTime = timelineToSourceTime(clipRanges, time);
     const nextClipRange = findClipRangeAtTime(clipRanges, time);
+    const wantsPlayback = shouldPlay && desiredPlaybackRef.current;
 
     if (videoRef.current && Number.isFinite(sourceTime)) {
-      if (Math.abs(videoRef.current.currentTime - sourceTime) > (shouldPlay ? 0.2 : 0.02)) {
+      if (Math.abs(videoRef.current.currentTime - sourceTime) > (wantsPlayback ? 0.2 : 0.02)) {
         videoRef.current.currentTime = sourceTime;
       }
       videoRef.current.playbackRate = nextClipRange?.clip.speed ?? 1;
@@ -2872,27 +2957,27 @@ export function App() {
       videoRef.current.volume = nextClipRange
         ? getVideoClipPreviewVolume(nextClipRange, time)
         : 1;
-      if (shouldPlay && videoRef.current.paused) {
-        void videoRef.current.play();
+      if (wantsPlayback && videoRef.current.paused) {
+        void requestMainVideoPlayback();
       }
     }
 
     if (transitionVideoRef.current && transitionPreview) {
       if (
         Math.abs(transitionVideoRef.current.currentTime - transitionPreview.nextSourceTime) >
-        (shouldPlay ? 0.2 : 0.02)
+        (wantsPlayback ? 0.2 : 0.02)
       ) {
         transitionVideoRef.current.currentTime = transitionPreview.nextSourceTime;
       }
       transitionVideoRef.current.playbackRate =
         videoClips.find((clip) => clip.id === transitionPreview.transition.toClipId)
           ?.speed ?? 1;
-      if (shouldPlay && transitionVideoRef.current.paused) {
-        void transitionVideoRef.current.play();
+      if (wantsPlayback && transitionVideoRef.current.paused && !videoRef.current?.paused) {
+        void transitionVideoRef.current.play().catch(() => undefined);
       }
     }
 
-    syncExternalAudioPreview(time, shouldPlay);
+    syncExternalAudioPreview(time, wantsPlayback && !videoRef.current?.paused);
   }
 
   function syncExternalAudioPreview(time: number, shouldPlay = isPlaying) {
@@ -2928,9 +3013,9 @@ export function App() {
   useEffect(() => {
     if (!isPlaying) {
       playbackClockRef.current = null;
-      videoRef.current?.pause();
-      transitionVideoRef.current?.pause();
-      pauseExternalAudioPreview();
+      if (!desiredPlaybackRef.current) {
+        pausePreviewMedia();
+      }
       return;
     }
 
@@ -2943,9 +3028,8 @@ export function App() {
       setCurrentTime((previousTime) => {
         const nextTime = clamp(previousTime + delta, 0, timelineDuration);
         if (nextTime >= timelineDuration) {
-          videoRef.current?.pause();
-          transitionVideoRef.current?.pause();
-          pauseExternalAudioPreview();
+          desiredPlaybackRef.current = false;
+          pausePreviewMedia();
           setIsPlaying(false);
         }
         return nextTime;
@@ -3176,6 +3260,7 @@ export function App() {
 
       if (event.code === 'Space') {
         event.preventDefault();
+        if (event.repeat) return;
         void togglePlayback();
         return;
       }
@@ -3695,8 +3780,8 @@ export function App() {
                     }
                     ensureDefaultClip(sourceDuration, primaryVideoSourceId);
                   }}
-                  onPlay={() => setIsPlaying(true)}
-                  onPause={() => setIsPlaying(false)}
+                  onPlay={handlePreviewPlay}
+                  onPause={handlePreviewPause}
                 />
                 {transitionPreview && (
                   <video
@@ -9949,6 +10034,24 @@ function formatExportPreflightNote(messages: string[], risk: 'low' | 'medium' | 
 
 function compactFfmpegLog(message: string) {
   return message.replace(/\s+/g, ' ').trim().slice(0, 180);
+}
+
+function getPreviewPlaybackErrorMessage(error: unknown) {
+  if (error instanceof DOMException) {
+    if (error.name === 'NotAllowedError') {
+      return '브라우저가 재생을 차단했습니다. 미리보기에서 다시 재생을 눌러 주세요.';
+    }
+
+    if (error.name === 'NotSupportedError') {
+      return '현재 브라우저가 이 영상 코덱을 미리보기 재생하지 못했습니다.';
+    }
+
+    if (error.name === 'AbortError') {
+      return '영상 소스가 바뀌거나 이동 중이라 재생을 중단했습니다. 다시 재생해 주세요.';
+    }
+  }
+
+  return '미리보기 재생에 실패했습니다. 다시 재생해 주세요.';
 }
 
 function downloadText(content: string, fileName: string, type: string) {
