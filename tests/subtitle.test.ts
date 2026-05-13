@@ -266,6 +266,80 @@ describe('ASS export helpers', () => {
     expect(script).toContain('\\N');
   });
 
+  it('renders text overlay backgrounds as separate ASS drawing boxes', () => {
+    const script = buildAssScript(
+      [],
+      [
+        {
+          id: 'text-1',
+          start: 0,
+          end: 2,
+          text: '배경 텍스트',
+          x: 50,
+          y: 50,
+          fontFamily: 'AppleGothicLocal',
+          fontSize: 48,
+          fontWeight: 700,
+          italic: false,
+          underline: false,
+          align: 'center',
+          scaleX: 1,
+          scaleY: 1,
+          boxWidth: 40,
+          wrapMode: 'auto',
+          color: '#ffffff',
+          background: 'rgba(1, 2, 3, 0.5)',
+          outlineColor: '#ff0000',
+          outlineWidth: 2,
+          shadow: true
+        }
+      ],
+      { width: 1000, height: 600 }
+    );
+
+    expect(script).toContain('Style: OverlayBox');
+    expect(script).toContain('Dialogue: 2,0:00:00.00,0:00:02.00,OverlayBox');
+    expect(script).toContain('\\p1');
+    expect(script).toContain('\\c&H00030201&');
+    expect(script).toContain('\\1a&H80&');
+    expect(script).toContain('Dialogue: 3,0:00:00.00,0:00:02.00,Overlay');
+    expect(script).toContain('\\3c&H000000FF&');
+    expect(script).toContain('\\4c&H000000FF&');
+  });
+
+  it('does not emit ASS drawing boxes for transparent text backgrounds', () => {
+    const script = buildAssScript(
+      [],
+      [
+        {
+          id: 'text-1',
+          start: 0,
+          end: 2,
+          text: '투명 배경',
+          x: 50,
+          y: 50,
+          fontFamily: 'AppleGothicLocal',
+          fontSize: 48,
+          fontWeight: 700,
+          italic: false,
+          underline: false,
+          align: 'center',
+          scaleX: 1,
+          scaleY: 1,
+          color: '#ffffff',
+          background: 'rgba(0, 0, 0, 0)',
+          outlineColor: '#000000',
+          outlineWidth: 1,
+          shadow: false
+        }
+      ],
+      { width: 1000, height: 600 }
+    );
+
+    expect(script).not.toContain('Dialogue: 2,0:00:00.00,0:00:02.00,OverlayBox');
+    expect(script).toContain('Dialogue: 3,0:00:00.00,0:00:02.00,Overlay');
+  });
+
   it('uses the exported internal font family when an imported font is available', () => {
     const script = buildAssScript(
       [],
