@@ -4872,7 +4872,7 @@ function TextPreview({
         textDecorationLine: overlay.underline ? 'underline' : 'none',
         textAlign: align,
         color: overlay.color,
-        background: overlay.background,
+        background: 'transparent',
         fontSize: overlay.fontSize,
         width: `${boxWidth}%`,
         boxSizing: 'border-box',
@@ -4941,7 +4941,9 @@ function TextPreview({
         />
       ) : (
         <>
-          <span className="text-preview-render">{renderedText}</span>
+          <span className="text-preview-render" style={{ background: overlay.background }}>
+            {renderedText}
+          </span>
           {selected && <span className="preview-edit-hint">더블클릭 편집</span>}
         </>
       )}

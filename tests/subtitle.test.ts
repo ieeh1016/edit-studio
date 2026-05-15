@@ -189,7 +189,7 @@ describe('ASS export helpers', () => {
     expect(script).toContain('\\b900');
     expect(script).toContain('\\i1');
     expect(script).toContain('\\u1');
-    expect(script).toContain('\\pos(960,216)');
+    expect(script).toContain('\\pos(975,216)');
     expect(script).toContain('\\fscx125');
     expect(script).toContain('\\fscy80');
     expect(script).toContain('\\pos(480,378)');
@@ -338,6 +338,44 @@ describe('ASS export helpers', () => {
 
     expect(script).not.toContain('Dialogue: 2,0:00:00.00,0:00:02.00,OverlayBox');
     expect(script).toContain('Dialogue: 3,0:00:00.00,0:00:02.00,Overlay');
+  });
+
+  it('keeps left aligned overlay text padded inside a text-sized background box', () => {
+    const script = buildAssScript(
+      [],
+      [
+        {
+          id: 'text-1',
+          start: 0,
+          end: 2,
+          text: 'Hi',
+          x: 10,
+          y: 20,
+          fontFamily: 'AppleGothicLocal',
+          fontSize: 50,
+          fontWeight: 700,
+          italic: false,
+          underline: false,
+          align: 'left',
+          scaleX: 1,
+          scaleY: 1,
+          boxWidth: 40,
+          wrapMode: 'auto',
+          color: '#ffffff',
+          background: 'rgba(0, 0, 0, 0.5)',
+          outlineColor: '#000000',
+          outlineWidth: 1,
+          shadow: false
+        }
+      ],
+      { width: 1000, height: 600 }
+    );
+
+    expect(script).toContain('Dialogue: 2,0:00:00.00,0:00:02.00,OverlayBox');
+    expect(script).toContain('\\pos(100,84)');
+    expect(script).toContain('Dialogue: 3,0:00:00.00,0:00:02.00,Overlay');
+    expect(script).toContain('\\pos(112,120)');
+    expect(script).not.toContain('l 394 0');
   });
 
   it('uses the exported internal font family when an imported font is available', () => {

@@ -415,7 +415,7 @@ select:focus-visible {
   --text-handle-scale-y: 1;
   position: absolute;
   max-width: 95%;
-  padding: 7px 12px;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -436,8 +436,12 @@ select:focus-visible {
 }
 
 .text-preview-render {
-  display: block;
-  width: 100%;
+  display: inline-block;
+  max-width: 100%;
+  padding: 7px 12px;
+  border-radius: 6px;
+  box-sizing: border-box;
+  text-align: inherit;
   white-space: pre-wrap;
 }
 

@@ -108,6 +108,8 @@ const captionTextLayer = 1;
 const overlayBoxLayer = 2;
 const overlayTextLayer = 3;
 const effectLayer = 4;
+const overlayPaddingX = 12;
+const overlayPaddingY = 7;
 
 function captionCueToDialogues(
   cue: CaptionCue,
@@ -151,11 +153,13 @@ function overlayToDialogues(
   availableFontFamilies: Set<string> | null,
   fontRegistry: AssFontRegistry
 ) {
-  const x = Math.round((overlay.x / 100) * dimensions.width);
+  const anchorX = Math.round((overlay.x / 100) * dimensions.width);
   const y = Math.round((overlay.y / 100) * dimensions.height);
   const scaleX = clamp(overlay.scaleX ?? 1, 0.25, 4);
   const scaleY = clamp(overlay.scaleY ?? 1, 0.25, 4);
   const fontWeight = normalizeAssFontWeight(overlay.fontWeight ?? 400);
+  const align = overlay.align ?? 'center';
+  const textX = getPaddedOverlayTextX(anchorX, align, scaleX);
   const wrappedText = wrapTextForRender(overlay.text.trim(), {
     wrapMode: overlay.wrapMode,
     boxWidth: overlay.boxWidth,
@@ -164,8 +168,8 @@ function overlayToDialogues(
     scaleX
   });
   const tags = [
-    `\\an${getOverlayAlignment(overlay.align ?? 'center')}`,
-    `\\pos(${x},${y})`,
+    `\\an${getOverlayAlignment(align)}`,
+    `\\pos(${textX},${y})`,
     `\\fn${escapeAssFontName(
       resolveAssFontFamily(overlay.fontFamily, availableFontFamilies, fontRegistry, {
         weight: overlay.fontWeight ?? 400,
@@ -268,10 +272,20 @@ function overlayBackgroundToDialogue(
 
   const scaleX = clamp(overlay.scaleX ?? 1, 0.25, 4);
   const scaleY = clamp(overlay.scaleY ?? 1, 0.25, 4);
-  const boxWidth = clamp(overlay.boxWidth ?? 56, 12, 95);
-  const width = Math.max(1, ((dimensions.width * boxWidth) / 100) * scaleX);
-  const lineCount = getTextLines(wrappedText).length;
-  const height = Math.max(1, (lineCount * overlay.fontSize * 1.16 + 14) * scaleY);
+  const lines = getTextLines(wrappedText);
+  const maxContentWidth = Math.max(
+    1,
+    Math.max(...lines.map((line) => estimateLineWidth(line, overlay.fontSize)))
+  );
+  const maxOuterWidth = ((dimensions.width * clamp(overlay.boxWidth ?? 56, 12, 95)) / 100) * scaleX;
+  const width = Math.max(
+    1,
+    Math.min(maxContentWidth * scaleX + overlayPaddingX * 2 * scaleX, maxOuterWidth)
+  );
+  const height = Math.max(
+    1,
+    (lines.length * overlay.fontSize * 1.16 + overlayPaddingY * 2) * scaleY
+  );
   const x = (overlay.x / 100) * dimensions.width;
   const y = (overlay.y / 100) * dimensions.height;
   const align = overlay.align ?? 'center';
@@ -289,6 +303,13 @@ function overlayBackgroundToDialogue(
     height,
     radius: 6 * ((scaleX + scaleY) / 2)
   });
+}
+
+function getPaddedOverlayTextX(anchorX: number, align: TextAlign, scaleX: number) {
+  const padding = Math.round(overlayPaddingX * scaleX);
+  if (align === 'left') return anchorX + padding;
+  if (align === 'right') return anchorX - padding;
+  return anchorX;
 }
 
 function backgroundBoxToDialogue({
