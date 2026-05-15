@@ -192,6 +192,10 @@ type AudioUrlMap = Record<string, string>;
 type MediaFileMap = Record<string, File>;
 type MediaUrlMap = Record<string, string>;
 type TimelineThumbnailRequest = TimelineThumbnailWindow;
+type TextOverlayClipboard = {
+  kind: 'overlay';
+  overlay: TextOverlay;
+};
 type PreviewGuideState = {
   vertical?: number;
   horizontal?: number;
@@ -383,7 +387,7 @@ const helpSections = [
   },
   {
     title: '타임라인',
-    body: '휠/트랙패드로 좌우 이동, Ctrl 또는 Cmd+휠로 커서 기준 확대/축소, Fit으로 전체 보기, 트랙 경계 드래그로 높이 조절을 할 수 있습니다. Space 재생, ←/→ 1초 이동, Shift+←/→ 5초 이동, S 분할, I/O 구간 지정, Delete 삭제도 지원합니다.'
+    body: '휠/트랙패드로 좌우 이동, Ctrl 또는 Cmd+휠로 커서 기준 확대/축소, Fit으로 전체 보기, 트랙 경계 드래그로 높이 조절을 할 수 있습니다. Space 재생, ←/→ 1초 이동, Shift+←/→ 5초 이동, S 분할, I/O 구간 지정, Delete 삭제도 지원합니다. 텍스트는 Ctrl/Cmd+C로 복사, Ctrl/Cmd+V로 현재 위치에 붙여넣기, Ctrl/Cmd+D로 즉시 복제하거나 Alt/Option+드래그로 복제 이동할 수 있습니다.'
   },
   {
     title: '자막/텍스트/효과',
@@ -508,6 +512,7 @@ export function App() {
   const audioUrlsRef = useRef<AudioUrlMap>({});
   const mediaUrlsRef = useRef<MediaUrlMap>({});
   const autosaveProjectRef = useRef<ProjectFile | null>(null);
+  const textOverlayClipboardRef = useRef<TextOverlayClipboard | null>(null);
   const videoCacheVersionRef = useRef(0);
   const thumbnailCacheRef = useRef<Map<number, TimelineThumbnail>>(new Map());
   const thumbnailVideoUrlRef = useRef<string | null>(null);
@@ -2055,6 +2060,70 @@ export function App() {
     reorderVideoClip(selectedClip.id, selectedClipIndex + offset);
   }
 
+  function cloneOverlayAtTime(overlay: TextOverlay, start: number) {
+    const length = Math.max(MIN_CUE_DURATION, overlay.end - overlay.start);
+    const boundedStart =
+      timelineDuration > 0
+        ? clamp(start, 0, Math.max(0, timelineDuration - length))
+        : Math.max(0, start);
+
+    return {
+      ...overlay,
+      id: crypto.randomUUID(),
+      start: boundedStart,
+      end:
+        timelineDuration > 0
+          ? Math.min(timelineDuration, boundedStart + length)
+          : boundedStart + length
+    };
+  }
+
+  function copySelectedTextOverlay() {
+    if (!selectedOverlay) return false;
+
+    textOverlayClipboardRef.current = {
+      kind: 'overlay',
+      overlay: { ...selectedOverlay }
+    };
+    void navigator.clipboard?.writeText(selectedOverlay.text).catch(() => undefined);
+    setStatus(`텍스트 "${selectedOverlay.text || '빈 텍스트'}" 복사됨`);
+    return true;
+  }
+
+  function pasteTextOverlayFromClipboard(start = currentTime) {
+    const clipboard = textOverlayClipboardRef.current;
+    if (!clipboard || clipboard.kind !== 'overlay') return false;
+
+    const clone = cloneOverlayAtTime(clipboard.overlay, start);
+    commitEditor((snapshot) => ({
+      ...snapshot,
+      overlays: [...snapshot.overlays, clone]
+    }));
+    setSelection({ kind: 'overlay', id: clone.id });
+    setPanelMode('texts');
+    seek(clone.start);
+    setStatus(`텍스트 "${clone.text || '빈 텍스트'}" 붙여넣음`);
+    return true;
+  }
+
+  function duplicateOverlayForTimelineDrag(id: string) {
+    const source = overlays.find((overlay) => overlay.id === id);
+    if (!source) return null;
+
+    const clone = {
+      ...source,
+      id: crypto.randomUUID()
+    };
+    commitEditor((snapshot) => ({
+      ...snapshot,
+      overlays: [...snapshot.overlays, clone]
+    }));
+    setSelection({ kind: 'overlay', id: clone.id });
+    setPanelMode('texts');
+    setStatus('텍스트 복제 드래그 시작');
+    return clone.id;
+  }
+
   function duplicateSelection() {
     if (selectedSourceAudioClip) {
       setStatus('원본 오디오는 영상 조각과 묶여 있어 별도 복제할 수 없습니다.');
@@ -3258,6 +3327,25 @@ export function App() {
 
       if (isEditableTarget(event.target)) return;
 
+      if (withCommand && key === 'c' && selectedOverlay) {
+        event.preventDefault();
+        copySelectedTextOverlay();
+        return;
+      }
+
+      if (withCommand && key === 'v') {
+        if (pasteTextOverlayFromClipboard()) {
+          event.preventDefault();
+          return;
+        }
+      }
+
+      if (withCommand && key === 'd' && selectedOverlay) {
+        event.preventDefault();
+        duplicateSelection();
+        return;
+      }
+
       if (event.code === 'Space') {
         event.preventDefault();
         if (event.repeat) return;
@@ -3331,6 +3419,19 @@ export function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   });
+
+  const quickTextTrackDuration = selectedOverlay
+    ? Math.max(timelineDuration, selectedOverlay.end, MIN_CUE_DURATION)
+    : Math.max(timelineDuration, MIN_CUE_DURATION);
+  const quickTextStartPercent = selectedOverlay
+    ? (selectedOverlay.start / quickTextTrackDuration) * 100
+    : 0;
+  const quickTextWidthPercent = selectedOverlay
+    ? Math.max(
+        0.6,
+        ((selectedOverlay.end - selectedOverlay.start) / quickTextTrackDuration) * 100
+      )
+    : 0;
 
   return (
     <div
@@ -3884,6 +3985,8 @@ export function App() {
                           groupKey ?? `preview-overlay-text:${overlay.id}`
                         )
                       }
+                      onCopy={copySelectedTextOverlay}
+                      onDuplicate={duplicateSelection}
                     />
                   ))}
                   {activeEffects.map((effect) => (
@@ -3932,6 +4035,88 @@ export function App() {
               </button>
             )}
           </div>
+
+          {selectedOverlay && (
+            <section className="text-quick-duration" aria-label="선택 텍스트 빠른 시간 조절">
+              <div className="text-quick-duration-header">
+                <div>
+                  <span>선택 텍스트</span>
+                  <strong>{selectedOverlay.text || '빈 텍스트'}</strong>
+                </div>
+                <em>{formatClock(selectedOverlay.end - selectedOverlay.start)}</em>
+              </div>
+              <div className="text-quick-track">
+                <span
+                  className="text-quick-segment"
+                  style={{
+                    left: `${quickTextStartPercent}%`,
+                    width: `${quickTextWidthPercent}%`
+                  }}
+                />
+              </div>
+              <div className="text-quick-sliders">
+                <label>
+                  시작
+                  <input
+                    type="range"
+                    min={0}
+                    max={quickTextTrackDuration}
+                    step={0.01}
+                    value={selectedOverlay.start}
+                    aria-label="텍스트 시작 시간"
+                    onChange={(event) => {
+                      const nextStart = Number(event.target.value);
+                      updateOverlayTime(selectedOverlay.id, 'start', nextStart);
+                      seek(nextStart);
+                    }}
+                  />
+                  <span>{formatClock(selectedOverlay.start)}</span>
+                </label>
+                <label>
+                  종료
+                  <input
+                    type="range"
+                    min={0}
+                    max={quickTextTrackDuration}
+                    step={0.01}
+                    value={selectedOverlay.end}
+                    aria-label="텍스트 종료 시간"
+                    onChange={(event) => {
+                      const nextEnd = Number(event.target.value);
+                      updateOverlayTime(selectedOverlay.id, 'end', nextEnd);
+                      seek(clamp(currentTime, selectedOverlay.start, nextEnd));
+                    }}
+                  />
+                  <span>{formatClock(selectedOverlay.end)}</span>
+                </label>
+              </div>
+              <div className="text-quick-duration-actions">
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateOverlayTime(selectedOverlay.id, 'start', currentTime);
+                  }}
+                >
+                  시작=현재
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateOverlayTime(selectedOverlay.id, 'end', currentTime);
+                  }}
+                >
+                  종료=현재
+                </button>
+                <button type="button" onClick={copySelectedTextOverlay}>
+                  <Copy size={13} />
+                  복사
+                </button>
+                <button type="button" onClick={() => pasteTextOverlayFromClipboard()}>
+                  붙여넣기
+                </button>
+              </div>
+            </section>
+          )}
 
           <div className="transport">
             <button type="button" className="icon-button" onClick={() => void togglePlayback()}>
@@ -4108,6 +4293,7 @@ export function App() {
             onMoveOverlay={(id, start, end, groupKey) =>
               updateOverlay(id, { start, end }, groupKey)
             }
+            onDuplicateOverlayForDrag={duplicateOverlayForTimelineDrag}
             onMoveEffect={(id, start, end, groupKey) =>
               updateEffect(id, { start, end }, groupKey)
             }
@@ -4733,7 +4919,9 @@ function TextPreview({
   onMoveEnd,
   onResize,
   onBoxWidthChange,
-  onTextChange
+  onTextChange,
+  onCopy,
+  onDuplicate
 }: {
   overlay: TextOverlay;
   outputDimensions: VideoDimensions;
@@ -4744,6 +4932,8 @@ function TextPreview({
   onResize: (scaleX: number, scaleY: number) => void;
   onBoxWidthChange: (boxWidth: number) => void;
   onTextChange: (text: string, groupKey?: string) => void;
+  onCopy: () => void;
+  onDuplicate: () => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const initialTextRef = useRef(overlay.text);
@@ -4949,6 +5139,23 @@ function TextPreview({
       )}
       {selected && !isEditing && (
         <>
+          <div
+            className="text-floating-inspector"
+            onClick={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button type="button" onClick={startEditing}>
+              편집
+            </button>
+            <button type="button" onClick={onCopy}>
+              <Copy size={12} />
+              복사
+            </button>
+            <button type="button" onClick={onDuplicate}>
+              복제
+            </button>
+          </div>
           {textResizeHandles.map((handle) => (
             <span
               key={handle}
@@ -5446,6 +5653,7 @@ type TimelineDragState =
       originalEnd: number;
       groupKey: string;
       hasMoved: boolean;
+      duplicated?: boolean;
     }
   | {
       kind: 'timed-trim';
@@ -5503,6 +5711,7 @@ function Timeline({
   onMoveImageClip,
   onMoveCue,
   onMoveOverlay,
+  onDuplicateOverlayForDrag,
   onMoveEffect,
   onThumbnailRequest,
   onSelect
@@ -5536,6 +5745,7 @@ function Timeline({
   onMoveImageClip: (id: string, start: number, end: number, groupKey?: string) => void;
   onMoveCue: (id: string, start: number, end: number, groupKey?: string) => void;
   onMoveOverlay: (id: string, start: number, end: number, groupKey?: string) => void;
+  onDuplicateOverlayForDrag: (id: string) => string | null;
   onMoveEffect: (id: string, start: number, end: number, groupKey?: string) => void;
   onThumbnailRequest: (request: TimelineThumbnailRequest) => void;
   onSelect: (selection: Exclude<Selection, null>) => void;
@@ -6229,18 +6439,23 @@ function Timeline({
   ) {
     event.stopPropagation();
     const selectionKind = itemKind === 'cue' ? 'cue' : itemKind;
-    onSelect({ kind: selectionKind, id: item.id });
+    const duplicateId =
+      itemKind === 'overlay' && event.altKey ? onDuplicateOverlayForDrag(item.id) : null;
+    const dragId = duplicateId ?? item.id;
+    onSelect({ kind: selectionKind, id: dragId });
     dragRef.current = {
       kind: 'timed-item',
       pointerId: event.pointerId,
       itemKind,
-      id: item.id,
+      id: dragId,
       startX: event.clientX,
       originalStart: item.start,
       originalEnd: item.end,
-      groupKey: `timeline-move:${itemKind}:${item.id}`,
-      hasMoved: false
+      groupKey: `timeline-move:${itemKind}:${dragId}`,
+      hasMoved: false,
+      duplicated: Boolean(duplicateId)
     };
+    syncTimedItemPreview(itemKind, item.start, item.end);
     event.currentTarget.setPointerCapture(event.pointerId);
   }
 
@@ -6253,13 +6468,14 @@ function Timeline({
       drag.hasMoved = true;
     }
 
-    const next = event.altKey
+    const next = event.altKey && !drag.duplicated
       ? clampTimedRange(drag.originalStart + delta, drag.originalEnd + delta, safeDuration)
       : snapTimedRange(drag.originalStart + delta, drag.originalEnd + delta);
 
     setDragGuide(next.snapped ? { time: next.snapTime, label: formatClock(next.snapTime) } : null);
 
     applyTimedItemRange(drag.itemKind, drag.id, next.start, next.end, drag.groupKey);
+    syncTimedItemPreview(drag.itemKind, next.start, next.end);
   }
 
   function endTimedItemDrag(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -6299,6 +6515,17 @@ function Timeline({
     } else {
       onMoveEffect(id, start, end, groupKey);
     }
+  }
+
+  function shouldSyncTimedItemPreview(itemKind: TimelineItemKind) {
+    return itemKind === 'overlay' || itemKind === 'cue' || itemKind === 'effect';
+  }
+
+  function syncTimedItemPreview(itemKind: TimelineItemKind, start: number, end: number) {
+    if (!shouldSyncTimedItemPreview(itemKind)) return;
+
+    const previewTime = currentTime >= start && currentTime <= end ? currentTime : start;
+    onSeek(clamp(previewTime, 0, safeDuration));
   }
 
   function startTimedItemTrim<T extends { id: string; start: number; end: number }>(
@@ -6345,6 +6572,7 @@ function Timeline({
         : null
     );
     applyTimedItemRange(drag.itemKind, drag.id, nextStart, nextEnd, drag.groupKey);
+    syncTimedItemPreview(drag.itemKind, nextStart, nextEnd);
   }
 
   function endTimedItemTrim(event: ReactPointerEvent<HTMLSpanElement>) {
@@ -6374,7 +6602,8 @@ function Timeline({
     className: string,
     icon: string,
     label: string,
-    title: string
+    title: string,
+    metaLabel = formatClock(layout.item.start)
   ) {
     const item = layout.item;
     const selected =
@@ -6420,7 +6649,7 @@ function Timeline({
         />
         <span className="clip-icon">{icon}</span>
         <span className="clip-title">{label}</span>
-        <span className="clip-meta">{formatClock(item.start)}</span>
+        <span className="clip-meta">{metaLabel}</span>
         <span
           className="timed-trim-handle timed-trim-end"
           aria-hidden="true"
@@ -7083,7 +7312,15 @@ function Timeline({
                   overlay.start,
                   overlay.end
                 );
-                return renderTimedItem(layout, 'overlay', 'overlay-item', 'T', overlay.text || '텍스트', title);
+                return renderTimedItem(
+                  layout,
+                  'overlay',
+                  'overlay-item',
+                  'TXT',
+                  overlay.text || '텍스트',
+                  title,
+                  formatClock(overlay.end - overlay.start)
+                );
               })}
             </TimelineLane>
             <TimelineLane
