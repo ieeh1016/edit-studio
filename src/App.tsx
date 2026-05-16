@@ -3420,19 +3420,6 @@ export function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   });
 
-  const quickTextTrackDuration = selectedOverlay
-    ? Math.max(timelineDuration, selectedOverlay.end, MIN_CUE_DURATION)
-    : Math.max(timelineDuration, MIN_CUE_DURATION);
-  const quickTextStartPercent = selectedOverlay
-    ? (selectedOverlay.start / quickTextTrackDuration) * 100
-    : 0;
-  const quickTextWidthPercent = selectedOverlay
-    ? Math.max(
-        0.6,
-        ((selectedOverlay.end - selectedOverlay.start) / quickTextTrackDuration) * 100
-      )
-    : 0;
-
   return (
     <div
       className="app-shell"
@@ -3793,6 +3780,143 @@ export function App() {
       )}
 
       <main className="workspace">
+        <aside className="component-panel" aria-label="컴포넌트 추가 및 관리">
+          <FontManager
+            fonts={fontAssets}
+            onImport={() => fontInputRef.current?.click()}
+          />
+
+          <div className="panel-tabs">
+            <button
+              type="button"
+              className={panelMode === 'media' ? 'active' : ''}
+              onClick={() => setPanelMode('media')}
+            >
+              <Clapperboard size={17} />
+              미디어
+            </button>
+            <button
+              type="button"
+              className={panelMode === 'video' ? 'active' : ''}
+              onClick={() => setPanelMode('video')}
+            >
+              <Film size={17} />
+              영상
+            </button>
+            <button
+              type="button"
+              className={panelMode === 'audio' ? 'active' : ''}
+              onClick={() => setPanelMode('audio')}
+            >
+              <Music size={17} />
+              오디오
+            </button>
+            <button
+              type="button"
+              className={panelMode === 'captions' ? 'active' : ''}
+              onClick={() => setPanelMode('captions')}
+            >
+              <Captions size={17} />
+              자막
+            </button>
+            <button
+              type="button"
+              className={panelMode === 'texts' ? 'active' : ''}
+              onClick={() => setPanelMode('texts')}
+            >
+              <Type size={17} />
+              텍스트
+            </button>
+            <button
+              type="button"
+              className={panelMode === 'effects' ? 'active' : ''}
+              onClick={() => setPanelMode('effects')}
+            >
+              <MousePointerClick size={17} />
+              효과
+            </button>
+          </div>
+
+          <div className="panel-actions">
+            <button
+              type="button"
+              onClick={
+                panelMode === 'media'
+                  ? () => mediaInputRef.current?.click()
+                  : panelMode === 'video'
+                  ? splitClipAtPlayhead
+                  : panelMode === 'audio'
+                    ? () => openAudioPicker('music')
+                  : panelMode === 'captions'
+                  ? addCaption
+                  : panelMode === 'texts'
+                    ? addTextOverlay
+                    : () => addInteractionEffect('tap')
+              }
+            >
+              {panelMode === 'video' ? <Scissors size={17} /> : <Plus size={17} />}
+              {panelMode === 'media'
+                ? '미디어 추가'
+                : panelMode === 'video'
+                ? '조각 분할'
+                : panelMode === 'audio'
+                  ? '음악 추가'
+                  : '추가'}
+            </button>
+            <button type="button" onClick={duplicateSelection} disabled={!selection}>
+              <Copy size={17} />
+              {panelMode === 'video'
+                ? '조각 복제'
+                : panelMode === 'audio'
+                  ? '오디오 복제'
+                  : '복제'}
+            </button>
+            <button type="button" onClick={moveSelectionToPlayhead} disabled={!selection}>
+              <Play size={17} />
+              {panelMode === 'video'
+                ? '조각 시작'
+                : panelMode === 'audio'
+                  ? '현재 위치'
+                  : '현재'}
+            </button>
+            <button type="button" onClick={deleteSelection} disabled={!selection}>
+              <Trash2 size={17} />
+              {panelMode === 'video'
+                ? '조각 삭제'
+                : panelMode === 'audio'
+                  ? selectedSourceAudioClip
+                    ? '음소거'
+                    : '삭제'
+                  : '삭제'}
+            </button>
+          </div>
+
+          <ComponentManagerPanel
+            panelMode={panelMode}
+            mediaSources={mediaSources}
+            mediaFiles={mediaFiles}
+            imageClips={imageClips}
+            videoRanges={clipRanges}
+            transitions={transitions}
+            audioSources={audioSources}
+            audioFiles={audioFiles}
+            audioClips={audioClips}
+            cues={cues}
+            overlays={overlays}
+            effects={effects}
+            selection={selection}
+            onAddMediaSourceToTimeline={addMediaSourceToTimeline}
+            onSelectImage={(id) => setSelection({ kind: 'image', id })}
+            onSelectClip={(id) => setSelection({ kind: 'clip', id })}
+            onSelectAudio={(id) => setSelection({ kind: 'audio', id })}
+            onSelectSourceAudio={(id) => setSelection({ kind: 'sourceAudio', id })}
+            onSelectCue={(id) => setSelection({ kind: 'cue', id })}
+            onSelectOverlay={(id) => setSelection({ kind: 'overlay', id })}
+            onSelectEffect={selectEffect}
+            onSeek={seek}
+          />
+        </aside>
+
         <section className="preview-column">
           {needsVideoRelink && (
             <div className="restore-banner" role="status">
@@ -4036,88 +4160,6 @@ export function App() {
             )}
           </div>
 
-          {selectedOverlay && (
-            <section className="text-quick-duration" aria-label="선택 텍스트 빠른 시간 조절">
-              <div className="text-quick-duration-header">
-                <div>
-                  <span>선택 텍스트</span>
-                  <strong>{selectedOverlay.text || '빈 텍스트'}</strong>
-                </div>
-                <em>{formatClock(selectedOverlay.end - selectedOverlay.start)}</em>
-              </div>
-              <div className="text-quick-track">
-                <span
-                  className="text-quick-segment"
-                  style={{
-                    left: `${quickTextStartPercent}%`,
-                    width: `${quickTextWidthPercent}%`
-                  }}
-                />
-              </div>
-              <div className="text-quick-sliders">
-                <label>
-                  시작
-                  <input
-                    type="range"
-                    min={0}
-                    max={quickTextTrackDuration}
-                    step={0.01}
-                    value={selectedOverlay.start}
-                    aria-label="텍스트 시작 시간"
-                    onChange={(event) => {
-                      const nextStart = Number(event.target.value);
-                      updateOverlayTime(selectedOverlay.id, 'start', nextStart);
-                      seek(nextStart);
-                    }}
-                  />
-                  <span>{formatClock(selectedOverlay.start)}</span>
-                </label>
-                <label>
-                  종료
-                  <input
-                    type="range"
-                    min={0}
-                    max={quickTextTrackDuration}
-                    step={0.01}
-                    value={selectedOverlay.end}
-                    aria-label="텍스트 종료 시간"
-                    onChange={(event) => {
-                      const nextEnd = Number(event.target.value);
-                      updateOverlayTime(selectedOverlay.id, 'end', nextEnd);
-                      seek(clamp(currentTime, selectedOverlay.start, nextEnd));
-                    }}
-                  />
-                  <span>{formatClock(selectedOverlay.end)}</span>
-                </label>
-              </div>
-              <div className="text-quick-duration-actions">
-                <button
-                  type="button"
-                  onClick={() => {
-                    updateOverlayTime(selectedOverlay.id, 'start', currentTime);
-                  }}
-                >
-                  시작=현재
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    updateOverlayTime(selectedOverlay.id, 'end', currentTime);
-                  }}
-                >
-                  종료=현재
-                </button>
-                <button type="button" onClick={copySelectedTextOverlay}>
-                  <Copy size={13} />
-                  복사
-                </button>
-                <button type="button" onClick={() => pasteTextOverlayFromClipboard()}>
-                  붙여넣기
-                </button>
-              </div>
-            </section>
-          )}
-
           <div className="transport">
             <button type="button" className="icon-button" onClick={() => void togglePlayback()}>
               {isPlaying ? <Pause size={20} /> : <Play size={20} />}
@@ -4155,7 +4197,9 @@ export function App() {
               </strong>
             </div>
           </div>
+        </section>
 
+        <section className="timeline-region" aria-label="타임라인">
           <div className="timeline-toolbar">
             <div className="timeline-toolbar-group">
               <span className="timeline-toolbar-label">상태</span>
@@ -4335,115 +4379,10 @@ export function App() {
           </div>
         </section>
 
-        <aside className="editor-panel" data-guide-target="editor-panel">
-          <FontManager
-            fonts={fontAssets}
-            onImport={() => fontInputRef.current?.click()}
-          />
-
-          <div className="panel-tabs">
-            <button
-              type="button"
-              className={panelMode === 'media' ? 'active' : ''}
-              onClick={() => setPanelMode('media')}
-            >
-              <Clapperboard size={17} />
-              미디어
-            </button>
-            <button
-              type="button"
-              className={panelMode === 'video' ? 'active' : ''}
-              onClick={() => setPanelMode('video')}
-            >
-              <Film size={17} />
-              영상
-            </button>
-            <button
-              type="button"
-              className={panelMode === 'audio' ? 'active' : ''}
-              onClick={() => setPanelMode('audio')}
-            >
-              <Music size={17} />
-              오디오
-            </button>
-            <button
-              type="button"
-              className={panelMode === 'captions' ? 'active' : ''}
-              onClick={() => setPanelMode('captions')}
-            >
-              <Captions size={17} />
-              자막
-            </button>
-            <button
-              type="button"
-              className={panelMode === 'texts' ? 'active' : ''}
-              onClick={() => setPanelMode('texts')}
-            >
-              <Type size={17} />
-              텍스트
-            </button>
-            <button
-              type="button"
-              className={panelMode === 'effects' ? 'active' : ''}
-              onClick={() => setPanelMode('effects')}
-            >
-              <MousePointerClick size={17} />
-              효과
-            </button>
-          </div>
-
-          <div className="panel-actions">
-            <button
-              type="button"
-              onClick={
-                panelMode === 'media'
-                  ? () => mediaInputRef.current?.click()
-                  : panelMode === 'video'
-                  ? splitClipAtPlayhead
-                  : panelMode === 'audio'
-                    ? () => openAudioPicker('music')
-                  : panelMode === 'captions'
-                  ? addCaption
-                  : panelMode === 'texts'
-                    ? addTextOverlay
-                    : () => addInteractionEffect('tap')
-              }
-            >
-              {panelMode === 'video' ? <Scissors size={17} /> : <Plus size={17} />}
-              {panelMode === 'media'
-                ? '미디어 추가'
-                : panelMode === 'video'
-                ? '조각 분할'
-                : panelMode === 'audio'
-                  ? '음악 추가'
-                  : '추가'}
-            </button>
-            <button type="button" onClick={duplicateSelection} disabled={!selection}>
-              <Copy size={17} />
-              {panelMode === 'video'
-                ? '조각 복제'
-                : panelMode === 'audio'
-                  ? '오디오 복제'
-                  : '복제'}
-            </button>
-            <button type="button" onClick={moveSelectionToPlayhead} disabled={!selection}>
-              <Play size={17} />
-              {panelMode === 'video'
-                ? '조각 시작'
-                : panelMode === 'audio'
-                  ? '현재 위치'
-                  : '현재'}
-            </button>
-            <button type="button" onClick={deleteSelection} disabled={!selection}>
-              <Trash2 size={17} />
-              {panelMode === 'video'
-                ? '조각 삭제'
-                : panelMode === 'audio'
-                  ? selectedSourceAudioClip
-                    ? '음소거'
-                    : '삭제'
-                  : '삭제'}
-            </button>
+        <aside className="editor-panel inspector-panel" data-guide-target="editor-panel">
+          <div className="inspector-panel-heading">
+            <span>수정</span>
+            <strong>{selectionSummary}</strong>
           </div>
 
           {panelMode === 'media' ? (
@@ -4510,10 +4449,16 @@ export function App() {
               overlays={overlays}
               selectedOverlay={selectedOverlay}
               fonts={fontAssets}
+              currentTime={currentTime}
+              timelineDuration={timelineDuration}
               onSelect={(id) => setSelection({ kind: 'overlay', id })}
               onSeek={seek}
               onUpdate={updateOverlay}
               onUpdateTime={updateOverlayTime}
+              onCopy={copySelectedTextOverlay}
+              onPaste={() => pasteTextOverlayFromClipboard()}
+              onDuplicate={duplicateSelection}
+              onDelete={deleteSelection}
             />
           ) : (
             <EffectPanel
@@ -6204,27 +6149,30 @@ function Timeline({
   }
 
   function handleTimelineWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    if (!viewportWidth) return;
+
+    const isZoomGesture = event.ctrlKey || event.metaKey;
+    const isHorizontalIntent =
+      event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY);
+
+    if (!isZoomGesture && !isHorizontalIntent) return;
+
     event.preventDefault();
     event.stopPropagation();
-
-    if (!viewportWidth) return;
 
     const scrollBounds = scrollRef.current?.getBoundingClientRect();
     const anchorX = scrollBounds
       ? clamp(event.clientX - scrollBounds.left, 0, viewportWidth)
       : viewportWidth / 2;
 
-    if (event.ctrlKey || event.metaKey) {
+    if (isZoomGesture) {
       const direction = event.deltaY > 0 ? -1 : 1;
       const multiplier = direction > 0 ? 1.16 : 1 / 1.16;
       handleZoom(pxPerSecond * multiplier, anchorX);
       return;
     }
 
-    const rawDelta =
-      event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)
-        ? event.deltaX || event.deltaY
-        : event.deltaY;
+    const rawDelta = event.shiftKey ? event.deltaY || event.deltaX : event.deltaX;
     const speed = event.shiftKey ? 1.6 : 1;
     syncScrollLeft(scrollLeft + rawDelta * speed);
   }
@@ -7579,6 +7527,330 @@ function TimelineLane({
   );
 }
 
+function ComponentManagerPanel({
+  panelMode,
+  mediaSources,
+  mediaFiles,
+  imageClips,
+  videoRanges,
+  transitions,
+  audioSources,
+  audioFiles,
+  audioClips,
+  cues,
+  overlays,
+  effects,
+  selection,
+  onAddMediaSourceToTimeline,
+  onSelectImage,
+  onSelectClip,
+  onSelectAudio,
+  onSelectSourceAudio,
+  onSelectCue,
+  onSelectOverlay,
+  onSelectEffect,
+  onSeek
+}: {
+  panelMode: PanelMode;
+  mediaSources: MediaSourceMeta[];
+  mediaFiles: MediaFileMap;
+  imageClips: ImageClip[];
+  videoRanges: ReturnType<typeof getClipTimelineRanges>;
+  transitions: ClipTransition[];
+  audioSources: AudioSourceMeta[];
+  audioFiles: AudioFileMap;
+  audioClips: AudioClip[];
+  cues: CaptionCue[];
+  overlays: TextOverlay[];
+  effects: InteractionEffect[];
+  selection: Selection;
+  onAddMediaSourceToTimeline: (sourceId: string) => void;
+  onSelectImage: (id: string) => void;
+  onSelectClip: (id: string) => void;
+  onSelectAudio: (id: string) => void;
+  onSelectSourceAudio: (id: string) => void;
+  onSelectCue: (id: string) => void;
+  onSelectOverlay: (id: string) => void;
+  onSelectEffect: (id: string) => void;
+  onSeek: (time: number) => void;
+}) {
+  const mediaSourceMap = new Map(mediaSources.map((source) => [source.id, source]));
+  const audioSourceMap = new Map(audioSources.map((source) => [source.id, source]));
+
+  const heading: Record<PanelMode, { title: string; detail: string }> = {
+    media: { title: '소스와 이미지', detail: `${mediaSources.length + imageClips.length}개` },
+    video: { title: '영상 조각', detail: `${videoRanges.length}개` },
+    audio: { title: '오디오', detail: `${videoRanges.length + audioClips.length}개` },
+    captions: { title: '자막', detail: `${cues.length}개` },
+    texts: { title: '텍스트', detail: `${overlays.length}개` },
+    effects: { title: '효과', detail: `${effects.length}개` }
+  };
+
+  const activeHeading = heading[panelMode];
+
+  return (
+    <section className="component-manager-body" aria-label="컴포넌트 목록">
+      <div className="component-manager-title">
+        <strong>{activeHeading.title}</strong>
+        <span>{activeHeading.detail}</span>
+      </div>
+
+      <div className="component-manager-list">
+        {panelMode === 'media' && (
+          <>
+            {mediaSources.length === 0 && imageClips.length === 0 && (
+              <p className="empty-copy">가져온 미디어 없음</p>
+            )}
+            {mediaSources.map((source) => {
+              const isMissing = !mediaFiles[source.id];
+              const detail = [
+                source.kind === 'video' && source.duration !== undefined
+                  ? formatClock(source.duration)
+                  : '',
+                source.width && source.height ? `${source.width}x${source.height}` : '',
+                formatFileSize(source.size)
+              ].filter(Boolean).join(' · ');
+
+              return (
+                <article
+                  key={source.id}
+                  className={`media-source-card manager-source-card ${isMissing ? 'is-missing' : ''}`}
+                >
+                  <span className="media-source-kind">
+                    {source.kind === 'image' ? 'IMG' : source.kind === 'audio' ? 'AUD' : 'VID'}
+                  </span>
+                  <div className="media-source-copy">
+                    <strong>{source.name}</strong>
+                    <small>{detail || '로컬 파일'}</small>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onAddMediaSourceToTimeline(source.id)}
+                    disabled={isMissing}
+                  >
+                    <Plus size={14} />
+                    배치
+                  </button>
+                </article>
+              );
+            })}
+            {imageClips.length > 0 && <div className="audio-list-section-title">이미지 클립</div>}
+            {imageClips.map((clip, index) => {
+              const source = mediaSourceMap.get(clip.sourceId);
+              return (
+                <button
+                  type="button"
+                  key={clip.id}
+                  className={
+                    selection?.kind === 'image' && selection.id === clip.id
+                      ? 'item-card clip-card active'
+                      : 'item-card clip-card'
+                  }
+                  onClick={() => {
+                    onSelectImage(clip.id);
+                    onSeek(clip.start);
+                  }}
+                >
+                  <span className="clip-card-index">I{index + 1}</span>
+                  <div className="clip-card-main">
+                    <strong>{source?.name ?? `이미지 ${index + 1}`}</strong>
+                    <small>
+                      {formatClock(clip.start)} - {formatClock(clip.end)}
+                    </small>
+                  </div>
+                </button>
+              );
+            })}
+          </>
+        )}
+
+        {panelMode === 'video' && (
+          <>
+            {videoRanges.length === 0 && <p className="empty-copy">영상 조각 없음</p>}
+            {videoRanges.map((range) => {
+              const nextClip = videoRanges[range.index + 1]?.clip;
+              const transition = nextClip
+                ? getTransitionBetween(transitions, range.clip.id, nextClip.id)
+                : null;
+
+              return (
+                <button
+                  type="button"
+                  key={range.clip.id}
+                  className={
+                    selection?.kind === 'clip' && selection.id === range.clip.id
+                      ? 'item-card clip-card active'
+                      : 'item-card clip-card'
+                  }
+                  onClick={() => {
+                    onSelectClip(range.clip.id);
+                    onSeek(range.start);
+                  }}
+                >
+                  <span className="clip-card-index">{range.index + 1}</span>
+                  <div className="clip-card-main">
+                    <strong>조각 {String(range.index + 1).padStart(2, '0')}</strong>
+                    <small>
+                      {formatClock(range.start)} - {formatClock(range.end)}
+                    </small>
+                  </div>
+                  <div className="clip-card-badges">
+                    <span>{range.clip.speed}x</span>
+                    {range.clip.muted && <span className="clip-badge-muted">Mute</span>}
+                    {transition && <span className="clip-badge-transition">FX</span>}
+                  </div>
+                </button>
+              );
+            })}
+          </>
+        )}
+
+        {panelMode === 'audio' && (
+          <>
+            {videoRanges.length === 0 && audioClips.length === 0 && (
+              <p className="empty-copy">오디오 트랙 없음</p>
+            )}
+            {videoRanges.length > 0 && <div className="audio-list-section-title">원본 오디오</div>}
+            {videoRanges.map((range) => {
+              const volume = normalizeAudioVolume(range.clip.volume);
+              return (
+                <button
+                  type="button"
+                  key={`manager-source-audio-${range.clip.id}`}
+                  className={
+                    selection?.kind === 'sourceAudio' && selection.id === range.clip.id
+                      ? 'item-card clip-card audio-card source-audio-card active'
+                      : 'item-card clip-card audio-card source-audio-card'
+                  }
+                  onClick={() => {
+                    onSelectSourceAudio(range.clip.id);
+                    onSeek(range.start);
+                  }}
+                >
+                  <span className="clip-card-index">{range.clip.muted ? 'M' : 'A'}</span>
+                  <div className="clip-card-main">
+                    <strong>원본 오디오 {String(range.index + 1).padStart(2, '0')}</strong>
+                    <small>{Math.round(volume * 100)}%</small>
+                  </div>
+                </button>
+              );
+            })}
+            {audioClips.length > 0 && <div className="audio-list-section-title">추가 오디오</div>}
+            {audioClips.map((clip, index) => {
+              const source = audioSourceMap.get(clip.sourceId);
+              const isMissing = !audioFiles[clip.sourceId];
+              return (
+                <button
+                  type="button"
+                  key={clip.id}
+                  className={
+                    selection?.kind === 'audio' && selection.id === clip.id
+                      ? 'item-card clip-card audio-card external-audio-card active'
+                      : 'item-card clip-card audio-card external-audio-card'
+                  }
+                  onClick={() => {
+                    onSelectAudio(clip.id);
+                    onSeek(clip.start);
+                  }}
+                >
+                  <span className="clip-card-index">{source?.kind === 'effect' ? 'S' : 'M'}</span>
+                  <div className="clip-card-main">
+                    <strong>{clip.label || `오디오 ${index + 1}`}</strong>
+                    <small>
+                      {formatClock(clip.start)} - {formatClock(clip.end)}
+                    </small>
+                  </div>
+                  <div className="clip-card-badges">
+                    <span>{Math.round(clip.volume * 100)}%</span>
+                    {isMissing && <span className="clip-badge-transition">파일 필요</span>}
+                  </div>
+                </button>
+              );
+            })}
+          </>
+        )}
+
+        {panelMode === 'captions' && (
+          <>
+            {cues.length === 0 && <p className="empty-copy">자막 없음</p>}
+            {cues.map((cue, index) => (
+              <button
+                type="button"
+                key={cue.id}
+                className={selection?.kind === 'cue' && selection.id === cue.id ? 'item-card active' : 'item-card'}
+                onClick={() => {
+                  onSelectCue(cue.id);
+                  onSeek(cue.start);
+                }}
+              >
+                <span>{index + 1}</span>
+                <strong>{cue.text || '빈 자막'}</strong>
+                <small>
+                  {formatClock(cue.start)} - {formatClock(cue.end)}
+                </small>
+              </button>
+            ))}
+          </>
+        )}
+
+        {panelMode === 'texts' && (
+          <>
+            {overlays.length === 0 && <p className="empty-copy">텍스트 없음</p>}
+            {overlays.map((overlay, index) => (
+              <button
+                type="button"
+                key={overlay.id}
+                className={
+                  selection?.kind === 'overlay' && selection.id === overlay.id
+                    ? 'item-card active'
+                    : 'item-card'
+                }
+                onClick={() => {
+                  onSelectOverlay(overlay.id);
+                  onSeek(overlay.start);
+                }}
+              >
+                <span>{index + 1}</span>
+                <strong>{overlay.text || '빈 텍스트'}</strong>
+                <small>
+                  {formatClock(overlay.start)} - {formatClock(overlay.end)}
+                </small>
+              </button>
+            ))}
+          </>
+        )}
+
+        {panelMode === 'effects' && (
+          <>
+            {effects.length === 0 && <p className="empty-copy">효과 없음</p>}
+            {effects.map((effect, index) => (
+              <button
+                type="button"
+                key={effect.id}
+                className={
+                  selection?.kind === 'effect' && selection.id === effect.id
+                    ? 'item-card active'
+                    : 'item-card'
+                }
+                onClick={() => {
+                  onSelectEffect(effect.id);
+                  onSeek(effect.start);
+                }}
+              >
+                <span>{index + 1}</span>
+                <strong>{effect.label || effectName(effect.kind)}</strong>
+                <small>
+                  {formatClock(effect.start)} - {formatClock(effect.end)}
+                </small>
+              </button>
+            ))}
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function MediaPanel({
   sources,
   sourceFiles,
@@ -8626,19 +8898,44 @@ function OverlayPanel({
   overlays,
   selectedOverlay,
   fonts,
+  currentTime,
+  timelineDuration,
   onSelect,
   onSeek,
   onUpdate,
-  onUpdateTime
+  onUpdateTime,
+  onCopy,
+  onPaste,
+  onDuplicate,
+  onDelete
 }: {
   overlays: TextOverlay[];
   selectedOverlay: TextOverlay | null | undefined;
   fonts: AppFontAsset[];
+  currentTime: number;
+  timelineDuration: number;
   onSelect: (id: string) => void;
   onSeek: (time: number) => void;
   onUpdate: (id: string, patch: Partial<TextOverlay>, groupKey?: string) => void;
   onUpdateTime: (id: string, key: 'start' | 'end', value: number) => void;
+  onCopy: () => void;
+  onPaste: () => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
 }) {
+  const textTrackDuration = selectedOverlay
+    ? Math.max(timelineDuration, selectedOverlay.end, MIN_CUE_DURATION)
+    : Math.max(timelineDuration, MIN_CUE_DURATION);
+  const textStartPercent = selectedOverlay
+    ? (selectedOverlay.start / textTrackDuration) * 100
+    : 0;
+  const textWidthPercent = selectedOverlay
+    ? Math.max(0.6, ((selectedOverlay.end - selectedOverlay.start) / textTrackDuration) * 100)
+    : 0;
+  const currentTimePercent = textTrackDuration
+    ? (clamp(currentTime, 0, textTrackDuration) / textTrackDuration) * 100
+    : 0;
+
   return (
     <div className="panel-body">
       <div className="item-list">
@@ -8664,6 +8961,99 @@ function OverlayPanel({
 
       {selectedOverlay && (
         <div className="inspector">
+          <section className="selected-text-manager" aria-label="선택 텍스트 관리">
+            <div className="selected-text-manager-header">
+              <div>
+                <span>선택 텍스트</span>
+                <strong>{selectedOverlay.text || '빈 텍스트'}</strong>
+              </div>
+              <em>{formatClock(selectedOverlay.end - selectedOverlay.start)}</em>
+            </div>
+            <div className="selected-text-track">
+              <span
+                className="selected-text-segment"
+                style={{
+                  left: `${textStartPercent}%`,
+                  width: `${textWidthPercent}%`
+                }}
+              />
+              <span
+                className="selected-text-current"
+                style={{ left: `${currentTimePercent}%` }}
+                aria-hidden="true"
+              />
+            </div>
+            <div className="selected-text-time-grid">
+              <label>
+                시작
+                <input
+                  type="range"
+                  min={0}
+                  max={textTrackDuration}
+                  step={0.01}
+                  value={selectedOverlay.start}
+                  aria-label="텍스트 시작 시간"
+                  onChange={(event) => {
+                    const nextStart = Number(event.target.value);
+                    onUpdateTime(selectedOverlay.id, 'start', nextStart);
+                    onSeek(nextStart);
+                  }}
+                />
+                <span>{formatClock(selectedOverlay.start)}</span>
+              </label>
+              <label>
+                종료
+                <input
+                  type="range"
+                  min={0}
+                  max={textTrackDuration}
+                  step={0.01}
+                  value={selectedOverlay.end}
+                  aria-label="텍스트 종료 시간"
+                  onChange={(event) => {
+                    const nextEnd = Number(event.target.value);
+                    onUpdateTime(selectedOverlay.id, 'end', nextEnd);
+                    onSeek(clamp(currentTime, selectedOverlay.start, nextEnd));
+                  }}
+                />
+                <span>{formatClock(selectedOverlay.end)}</span>
+              </label>
+            </div>
+            <div className="selected-text-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  onUpdateTime(selectedOverlay.id, 'start', currentTime);
+                  onSeek(currentTime);
+                }}
+              >
+                시작=현재
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onUpdateTime(selectedOverlay.id, 'end', currentTime);
+                  onSeek(currentTime);
+                }}
+              >
+                종료=현재
+              </button>
+              <button type="button" onClick={onCopy}>
+                <Copy size={13} />
+                복사
+              </button>
+              <button type="button" onClick={onPaste}>
+                붙여넣기
+              </button>
+              <button type="button" onClick={onDuplicate}>
+                복제
+              </button>
+              <button type="button" className="danger" onClick={onDelete}>
+                <Trash2 size={13} />
+                삭제
+              </button>
+            </div>
+          </section>
           <label>
             내용
             <textarea
